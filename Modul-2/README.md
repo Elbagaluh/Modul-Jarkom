@@ -1396,6 +1396,563 @@ DNS Forwarder digunakan untuk mengarahkan DNS Server ke IP yang ingin dituju.
 
 5. Delegasikan subdomain **yyy.ngerjain.jarkom.com** dan **asyik.yyy.ngerjain.jarkom.com** dari EniesLobby ke Water7 ! (yyy = 3 digit NRP terakhir)
 
+# Praktikum Jarkom: DHCP, DNS, dan Reverse Proxy
+
+Dokumentasi pengerjaan topologi GNS3 dengan Router (NAT), DHCP server (Kea), DNS server (BIND), tiga backend HTTP (nginx), dan satu reverse proxy (nginx).
+
+- **IP Prefix:** `10.14`
+- **Domain:** `sekolah.local`
+- **Appliance:** `netics-pc` dan `netics-pc-desktop` (Alpine Linux)
+
+## Daftar Isi
+
+1. [Soal](#soal)
+2. [Topologi dan Pemetaan IP](#topologi-dan-pemetaan-ip)
+3. [Langkah 1: Siapkan GNS3 VM](#langkah-1-siapkan-gns3-vm)
+4. [Langkah 2: Susun Topologi di GNS3](#langkah-2-susun-topologi-di-gns3)
+5. [Langkah 3: Router (Gateway dan NAT)](#langkah-3-router-gateway-dan-nat)
+6. [Langkah 4: IP Statis Node Server](#langkah-4-ip-statis-node-server)
+7. [Langkah 5: DHCP Server di Aegir](#langkah-5-dhcp-server-di-aegir)
+8. [Langkah 6: Client Meminta IP](#langkah-6-client-meminta-ip)
+9. [Langkah 7: DNS Server di Chernobog](#langkah-7-dns-server-di-chernobog)
+10. [Langkah 8: Backend di web1, web2, web3](#langkah-8-backend-di-web1-web2-web3)
+11. [Langkah 9: Reverse Proxy di Kazdel](#langkah-9-reverse-proxy-di-kazdel)
+12. [Langkah 10: Pembuktian](#langkah-10-pembuktian)
+13. [Langkah 11: Jawaban Pertanyaan Asisten](#langkah-11-jawaban-pertanyaan-asisten)
+14. [Catatan dan Troubleshooting](#catatan-dan-troubleshooting)
+
+---
+
+## Soal
+
+1. Koneksikan seluruh topologi agar bisa mendapat internet dari NAT (konfigurasi router, gateway, dan DHCP server).
+2. Pasang DNS server internal dengan domain `sekolah.local` yang mengarah ke Kazdel, dan integrasikan dengan DHCP server agar seluruh PC lab (DHCP client) otomatis mengetahui alamat DNS ini.
+3. Jalankan tiga backend HTTP berbeda (nilai, absensi, kalender akademik) di tiga node berbeda (web1, web2, web3) menggunakan nginx.
+4. Pasang satu reverse proxy yang bisa diakses lewat nama domain (`www.sekolah.local`), meneruskan `/nilai`, `/absensi`, dan `/kalender` ke masing-masing backend.
+5. Buktikan dari command line (curl) dan browser bahwa ketiga aplikasi dapat diakses lewat satu nama domain yang sama.
+6. Jelaskan kepada asisten:
+   - Bagaimana DNS, reverse proxy, dan backend bekerja sama sebagai satu sistem.
+   - Apa yang terjadi bila salah satu komponen tidak berfungsi.
+
+---
+
+## Topologi dan Pemetaan IP
+
+Alur besar: **topologi, NAT/Router, IP statis, DHCP, client, DNS, backend, reverse proxy, pengujian.**
+
+| Node | Appliance | Interface | IP / Mask | Gateway | Peran |
+|---|---|---|---|---|---|
+| Router | netics-pc | eth0 | DHCP dari NAT (`192.168.122.x`) | `192.168.122.1` | Akses internet via NAT |
+| Router | netics-pc | eth1 | `10.14.200.1/24` (statis) | - | Gateway jaringan lab |
+| Aegir | netics-pc | eth0 | `10.14.200.10/24` (statis) | `10.14.200.1` | DHCP server (Kea) |
+| Kazdel | netics-pc | eth0 | `10.14.200.11/24` (statis) | `10.14.200.1` | Reverse proxy (nginx :80) |
+| Chernobog | netics-pc | eth0 | `10.14.200.12/24` (statis) | `10.14.200.1` | DNS server (BIND) |
+| web1 | netics-pc | eth0 | `10.14.200.20/24` (statis) | `10.14.200.1` | Backend nilai (:8080) |
+| web2 | netics-pc | eth0 | `10.14.200.21/24` (statis) | `10.14.200.1` | Backend absensi (:8080) |
+| web3 | netics-pc | eth0 | `10.14.200.22/24` (statis) | `10.14.200.1` | Backend kalender (:8080) |
+| Sargon, Iberia, Higashi | netics-pc | eth0 | DHCP `10.14.200.100-150` | `10.14.200.1` | Client (curl) |
+| Ognisko | netics-pc-desktop | eth0 | DHCP `10.14.200.100-150` | `10.14.200.1` | Client (browser via VNC) |
+
+---
+
+## Langkah 1: Siapkan GNS3 VM
+
+**Tujuan:** node Docker dan node NAT hanya berjalan di GNS3 VM.
+
+1. Nyalakan GNS3 VM di VMware. Versinya harus sama dengan GNS3 GUI (3.0.6).
+2. Jika nanti Router tidak mendapat IP dari NAT, buka shell GNS3 VM lalu cek:
+
+```sh
+ip addr show virbr0
+```
+
+Harus ada `192.168.122.1/24`. Jika tidak ada, buat ulang network libvirt:
+
+```sh
+sudo virsh net-destroy default
+sudo virsh net-start default
+```
+
+---
+
+## Langkah 2: Susun Topologi di GNS3
+
+**Tujuan:** menentukan koneksi antar node.
+
+| Node | Appliance | Sambungan |
+|---|---|---|
+| NAT1 | NAT | ke Router eth0 |
+| Router | netics-pc | eth0 ke NAT, eth1 ke Switch1 |
+| Switch1 | Ethernet switch | ke Router, Switch2, Kazdel, Aegir, Chernobog, Switch3 |
+| Switch2 | Ethernet switch | ke Sargon, Iberia, Higashi, Ognisko |
+| Switch3 | Ethernet switch | ke web1, web2, web3 |
+| Aegir, Kazdel, Chernobog, web1, web2, web3 | netics-pc | eth0 ke switch |
+| Sargon, Iberia, Higashi | netics-pc | eth0 ke Switch2 |
+| Ognisko | netics-pc-desktop | eth0 ke Switch2 |
+
+Semua kabel memakai `eth0`, kecuali Router (eth0 ke NAT, eth1 ke Switch1). Start semua node.
+
+**Penjelasan:** switch menyatukan semua node dalam satu jaringan `10.14.200.0/24`. Router adalah satu-satunya pintu ke internet.
+
+---
+
+## Langkah 3: Router (Gateway dan NAT)
+
+**Tujuan:** memberi internet ke seluruh jaringan lab (Soal 1).
+
+### 3a. IP Router
+
+eth0 otomatis mendapat IP dari NAT. eth1 dibuat statis.
+
+```sh
+cat > /etc/network/interfaces << 'EOF'
+auto eth0
+iface eth0 inet dhcp
+
+auto eth1
+iface eth1 inet static
+    address 10.14.200.1
+    netmask 255.255.255.0
+EOF
+udhcpc -i eth0
+ip addr add 10.14.200.1/24 dev eth1
+ip link set eth1 up
+ip a
+```
+
+Harus terlihat eth0 `192.168.122.x` dan eth1 `10.14.200.1/24`. Pesan `Address already assigned` aman diabaikan.
+
+### 3b. Forwarding dan NAT
+
+```sh
+sysctl -w net.ipv4.ip_forward=1
+apk update
+apk add iptables
+iptables -t nat -A POSTROUTING -j MASQUERADE -o eth0 -s 10.14.0.0/16
+```
+
+**Penjelasan:**
+
+- `ip_forward=1` mengizinkan Router meneruskan paket antar interface.
+- `MASQUERADE` mengganti IP sumber `10.14.x.x` dengan IP eth0 Router, supaya balasan dari internet bisa kembali ke node lab.
+
+### Tes
+
+```sh
+ping -c 3 8.8.8.8
+iptables -t nat -L POSTROUTING -n -v
+```
+
+Aturan `MASQUERADE` harus muncul satu kali. Jangan menjalankan perintah `-A` berulang.
+
+---
+
+## Langkah 4: IP Statis Node Server
+
+**Tujuan:** alamat server harus tetap agar bisa dipetakan DNS dan dipakai proxy.
+
+Jalankan di Aegir, Kazdel, Chernobog, web1, web2, web3. Ganti `ADDR` sesuai tabel:
+
+| Node | ADDR |
+|---|---|
+| Aegir | `10.14.200.10` |
+| Kazdel | `10.14.200.11` |
+| Chernobog | `10.14.200.12` |
+| web1 | `10.14.200.20` |
+| web2 | `10.14.200.21` |
+| web3 | `10.14.200.22` |
+
+```sh
+cat > /etc/network/interfaces << 'EOF'
+auto eth0
+iface eth0 inet static
+    address ADDR
+    netmask 255.255.255.0
+    gateway 10.14.200.1
+EOF
+ifdown eth0; ifup eth0
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+```
+
+Jika `ifup` error, pasang manual:
+
+```sh
+ip addr add ADDR/24 dev eth0
+ip route add default via 10.14.200.1
+```
+
+**Penjelasan:**
+
+- `gateway` memberi tahu node ke mana mengirim paket yang tujuannya di luar subnet (ke Router).
+- `nameserver 8.8.8.8` bersifat sementara, agar `apk` bisa me-resolve nama repository.
+
+### Tes di tiap node
+
+```sh
+ip a show eth0
+ping -c 3 10.14.200.1
+ping -c 3 8.8.8.8
+```
+
+---
+
+## Langkah 5: DHCP Server di Aegir
+
+**Tujuan:** client mendapat IP, gateway, dan alamat DNS secara otomatis (Soal 1 dan 2).
+
+### 5a. Install
+
+```sh
+apk update
+apk add kea-dhcp4
+mkdir -p /etc/kea /var/lib/kea /run/kea
+```
+
+### 5b. Konfigurasi
+
+```sh
+cat > /etc/kea/kea-dhcp4.conf << 'EOF'
+{
+  "Dhcp4": {
+    "interfaces-config": { "interfaces": [ "eth0" ] },
+    "lease-database": {
+      "type": "memfile",
+      "persist": true,
+      "name": "/var/lib/kea/kea-leases4.csv"
+    },
+    "valid-lifetime": 600,
+    "max-valid-lifetime": 7200,
+    "option-data": [
+      { "name": "routers", "data": "10.14.200.1" },
+      { "name": "domain-name-servers", "data": "10.14.200.12, 8.8.8.8" },
+      { "name": "domain-name", "data": "sekolah.local" }
+    ],
+    "subnet4": [
+      {
+        "id": 1,
+        "subnet": "10.14.200.0/24",
+        "pools": [ { "pool": "10.14.200.100 - 10.14.200.150" } ]
+      }
+    ]
+  }
+}
+EOF
+```
+
+### 5c. Cek sintaks dan jalankan
+
+```sh
+kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
+kea-dhcp4 -c /etc/kea/kea-dhcp4.conf &
+```
+
+Baris `WARN` soal multi-threading normal. Yang tidak boleh ada adalah `ERROR`.
+
+**Penjelasan:**
+
+- `pool` adalah rentang IP yang dibagikan.
+- `routers` menjadi default gateway client.
+- `domain-name-servers` menjadi DNS client, dengan Chernobog di urutan pertama. Inilah integrasi DHCP dan DNS.
+- `domain-name` menjadi `search sekolah.local` di client.
+- Paket `dhcp` (ISC dhcpd) tidak tersedia di repository Alpine v3.23, sehingga dipakai Kea (ISC Kea, penerus resmi dhcpd).
+
+> **Peringatan:** jangan menjalankan `udhcpc` di Aegir. IP statisnya akan hilang.
+
+---
+
+## Langkah 6: Client Meminta IP
+
+**Tujuan:** membuktikan DHCP dan internet berjalan di seluruh topologi (Soal 1).
+
+Jalankan di Sargon, Iberia, Higashi, dan Ognisko (lewat xterm di desktop Ognisko):
+
+```sh
+udhcpc -i eth0
+ip a show eth0
+cat /etc/resolv.conf
+ping -c 3 8.8.8.8
+```
+
+Hasil yang benar:
+
+- IP berada di `10.14.200.100-150`.
+- `resolv.conf` berisi `search sekolah.local` dan `nameserver 10.14.200.12`.
+- `ping 8.8.8.8` berhasil.
+
+Nameserver Chernobog belum menjawab sampai Langkah 7 selesai.
+
+---
+
+## Langkah 7: DNS Server di Chernobog
+
+**Tujuan:** mengubah nama `www.sekolah.local` menjadi IP Kazdel (Soal 2).
+
+### 7a. Install dan direktori
+
+```sh
+apk update
+apk add bind bind-tools
+mkdir -p /root/dns
+```
+
+### 7b. `named.conf`
+
+```sh
+cat > /root/dns/named.conf << 'EOF'
+options {
+    directory "/root/dns";
+    listen-on { any; };
+    allow-query { any; };
+};
+logging {
+    channel default_log {
+        file "/root/dns/named.log" versions 3 size 5m;
+        severity info;
+        print-time yes;
+        print-severity yes;
+        print-category yes;
+    };
+    category default { default_log; };
+    category queries { default_log; };
+};
+zone "sekolah.local" {
+    type master;
+    file "db.sekolah.local";
+};
+EOF
+```
+
+### 7c. File zona
+
+```sh
+cat > /root/dns/db.sekolah.local << 'EOF'
+$TTL 86400
+@ IN SOA ns1.sekolah.local. admin.sekolah.local. (
+    1 ; serial
+    3600 ; refresh
+    1800 ; retry
+    604800 ; expire
+    86400 ) ; minimum
+  IN NS ns1.sekolah.local.
+ns1 IN A 10.14.200.12
+www IN A 10.14.200.11
+EOF
+```
+
+### 7d. Cek dan jalankan
+
+```sh
+named-checkconf /root/dns/named.conf
+named-checkzone sekolah.local /root/dns/db.sekolah.local
+named -c /root/dns/named.conf
+sleep 2
+dig @127.0.0.1 www.sekolah.local +short
+```
+
+Hasil `dig` harus `10.14.200.11`.
+
+**Penjelasan:**
+
+- `named.conf` mendefinisikan zona yang dilayani.
+- File zona berisi record `NS` (server nama) dan `A` (nama ke IP).
+- `www` diarahkan ke Kazdel (reverse proxy), bukan ke backend, sehingga satu alamat melayani semua aplikasi.
+
+### 7e. Tes dari client
+
+Di Sargon:
+
+```sh
+udhcpc -i eth0
+cat /etc/resolv.conf
+ping -c 3 www.sekolah.local
+```
+
+---
+
+## Langkah 8: Backend di web1, web2, web3
+
+**Tujuan:** tiga aplikasi terpisah, masing-masing di node sendiri pada port 8080 (Soal 3).
+
+| Node | Aplikasi | Isi halaman |
+|---|---|---|
+| web1 | Nilai | `Aplikasi NILAI (web1)` |
+| web2 | Absensi | `Aplikasi ABSENSI (web2)` |
+| web3 | Kalender akademik | `Aplikasi KALENDER (web3)` |
+
+Jika tersedia file `web1.html`, `web2.html`, `web3.html` dari soal, gunakan isinya sebagai `index.html`.
+
+Contoh di web1 (ulangi di web2 dan web3 dengan teks berbeda):
+
+```sh
+apk update
+apk add nginx
+mkdir -p /root/myconfig /root/myweb /root/mylogs
+
+cat > /root/myweb/index.html << 'EOF'
+<html>
+<head><title>Nilai</title></head>
+<body><p>Aplikasi NILAI (web1)</p></body>
+</html>
+EOF
+
+cat > /root/myconfig/nginx.conf << 'EOF'
+user root;
+worker_processes auto;
+pid /tmp/nginx.pid;
+error_log /root/mylogs/error.log;
+events { worker_connections 768; }
+http {
+    include /etc/nginx/mime.types;
+    server {
+        listen 8080;
+        server_name _;
+        root /root/myweb;
+        index index.html;
+        location / { try_files $uri $uri/ =404; }
+    }
+}
+EOF
+
+nginx -t -c /root/myconfig/nginx.conf
+nginx -c /root/myconfig/nginx.conf
+netstat -tln | grep :8080
+```
+
+**Penjelasan:**
+
+- `listen 8080` agar port 80 hanya dipakai oleh reverse proxy.
+- Tiap backend berdiri sendiri di node berbeda.
+- `server_name _` menerima Host apa pun, sehingga bisa diakses lewat IP langsung maupun lewat proxy.
+- Jangan menekan Ctrl+C setelah nginx berjalan, karena akan menghentikannya.
+
+### Tes dari Sargon
+
+```sh
+curl http://10.14.200.20:8080
+curl http://10.14.200.21:8080
+curl http://10.14.200.22:8080
+```
+
+---
+
+## Langkah 9: Reverse Proxy di Kazdel
+
+**Tujuan:** satu pintu masuk yang meneruskan request ke backend berdasarkan path (Soal 4).
+
+```sh
+apk update
+apk add nginx
+mkdir -p /root/myconfig /root/mylogs
+
+cat > /root/myconfig/nginx.conf << 'EOF'
+user root;
+worker_processes auto;
+pid /tmp/nginx.pid;
+error_log /root/mylogs/error.log;
+events { worker_connections 768; }
+http {
+    include /etc/nginx/mime.types;
+    server {
+        listen 80;
+        server_name www.sekolah.local;
+
+        location = /nilai {
+            proxy_pass http://10.14.200.20:8080/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+        location = /absensi {
+            proxy_pass http://10.14.200.21:8080/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+        location = /kalender {
+            proxy_pass http://10.14.200.22:8080/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+    }
+}
+EOF
+
+nginx -t -c /root/myconfig/nginx.conf
+nginx -c /root/myconfig/nginx.conf
+netstat -tln | grep :80
+```
+
+**Penjelasan:**
+
+- `server_name` mencocokkan header `Host`, sehingga proxy melayani `www.sekolah.local`.
+- `location = /nilai` mencocokkan path secara persis.
+- `proxy_pass` meneruskan request ke backend. Tanda `/` di akhir membuat backend menerima path `/`.
+- `proxy_set_header Host` mempertahankan nama host asli.
+- `proxy_set_header X-Real-IP` menyampaikan IP client asli ke backend.
+
+---
+
+## Langkah 10: Pembuktian
+
+**Tujuan:** membuktikan tiga aplikasi dapat diakses lewat satu nama domain (Soal 5).
+
+### Dari Sargon (curl)
+
+```sh
+curl http://www.sekolah.local/nilai
+curl http://www.sekolah.local/absensi
+curl http://www.sekolah.local/kalender
+```
+
+Gunakan `curl -v` untuk melihat header request dan response.
+
+### Dari Ognisko (browser via VNC)
+
+Buka tiga alamat berikut, lalu screenshot masing-masing:
+
+- `http://www.sekolah.local/nilai`
+- `http://www.sekolah.local/absensi`
+- `http://www.sekolah.local/kalender`
+
+Satu nama domain yang sama menampilkan tiga aplikasi berbeda.
+
+---
+
+## Langkah 11: Jawaban Pertanyaan Asisten
+
+### a. Bagaimana DNS, reverse proxy, dan backend bekerja sama?
+
+Client mendapat alamat DNS dari DHCP. Saat membuka `www.sekolah.local`, DNS (Chernobog) menjawab IP Kazdel. Client mengirim request ke Kazdel, yang membaca path lalu meneruskannya ke backend yang sesuai (`/nilai` ke web1, `/absensi` ke web2, `/kalender` ke web3). Jawaban backend kembali lewat proxy ke client. Client hanya mengenal satu nama dan satu alamat.
+
+### b. Apa yang terjadi bila satu komponen tidak berfungsi?
+
+| Komponen mati | Dampak |
+|---|---|
+| DNS (Chernobog) | Akses lewat nama gagal. Akses lewat IP langsung masih bisa. |
+| Reverse proxy (Kazdel) | Semua aplikasi tidak bisa diakses lewat domain, walau backend sehat. |
+| Satu backend | Hanya path itu yang gagal (error 502 Bad Gateway), dua lainnya normal. |
+| DHCP (Aegir) | Client baru tidak mendapat IP dan DNS. Client yang sudah punya lease tetap berjalan sampai lease habis. |
+| Router | Internet putus, komunikasi di dalam lab tetap berjalan. |
+
+---
+
+## Catatan dan Troubleshooting
+
+- Perintah manual dan proses hilang saat node di-stop. Paket `apk` bisa ikut hilang, jadi install ulang bila perlu lalu jalankan kembali layanannya. File di `/root` biasanya tetap ada.
+- Simpan perintah start layanan di `/root/init.sh` agar mudah dijalankan ulang.
+- `Connection refused` pada curl berarti belum ada proses yang listen di port tersebut. Cek dengan `netstat -tln`.
+- `Network unreachable` di client biasanya berarti client belum mendapat IP. Jalankan `udhcpc -i eth0` di client (bukan di Aegir).
+- Jika Router tidak mendapat IP dari NAT, cek `virbr0` di GNS3 VM (lihat Langkah 1).
+- Ambil screenshot selagi semua layanan hidup, dengan prompt node terlihat.
+
+### Ringkasan layanan per node
+
+| Node | Layanan | Perintah start |
+|---|---|---|
+| Router | IP forwarding dan NAT | `sysctl -w net.ipv4.ip_forward=1` dan aturan `iptables` |
+| Aegir | Kea DHCP | `kea-dhcp4 -c /etc/kea/kea-dhcp4.conf &` |
+| Chernobog | BIND | `named -c /root/dns/named.conf` |
+| web1, web2, web3 | nginx :8080 | `nginx -c /root/myconfig/nginx.conf` |
+| Kazdel | nginx reverse proxy :80 | `nginx -c /root/myconfig/nginx.conf` |
+
 ### 6.5 Referensi
 
 - https://computer.howstuffworks.com/dns.htm
