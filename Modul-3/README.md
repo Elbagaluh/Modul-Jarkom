@@ -212,10 +212,31 @@ atau dengan memastikan `net.ipv4.ip_forward=1` ada (biasa di-comment) di dalam `
 ```
 sysctl -p
 ```
-# Modul 3: Reliable Data Transfer TCP & Static Routing (Panduan Praktikum)
+# Modul 3: Reliable Data Transfer TCP & Static Routing
 
-Isi: tutorial pra-praktikum, daftar filter Wireshark beserta hasil yang seharusnya, kemungkinan pertanyaan praktikum, dan troubleshooting.
-Prefix IP yang dipakai: **10.14**. Nilai contoh (ISN, RTT, throughput) berasal dari lab sendiri dan **akan berbeda** di percobaan baru. Pahami caranya, jangan hafal angkanya.
+Panduan belajar praktikum. Fokus: **prediksi, pertanyaan beserta jawabannya, filter Wireshark dan hasil yang seharusnya, koreksi laporan, troubleshooting**.
+
+Prefix IP: **10.14**. Angka contoh (ISN, RTT, throughput) berasal dari lab sendiri dan **akan berbeda** saat praktikum. Pahami caranya, jangan hafal angkanya.
+
+Catatan penulisan file: semua pembuatan file di panduan ini memakai **nano** (simpan `Ctrl+O`, Enter; keluar `Ctrl+X`). Kalau nano belum ada: `apk add nano` (butuh internet).
+
+---
+
+## Daftar Isi
+
+1. Peta topologi
+2. Tutorial persiapan
+3. Capture Wireshark di GNS3
+4. Tabel filter Wireshark
+5. Bagian A: prediksi, tabel, pertanyaan
+6. Bagian B: prediksi, tabel, pertanyaan
+7. Bagian C: prediksi, tabel, pertanyaan
+8. Bagian D: prediksi, tabel, pertanyaan
+9. Bagian E: prediksi, tabel, pertanyaan
+10. Pertanyaan lisan yang mungkin ditanyakan
+11. Koreksi laporan (temuan dari file laporan)
+12. Troubleshooting
+13. Checklist bukti
 
 ---
 
@@ -228,54 +249,72 @@ Prefix IP yang dipakai: **10.14**. Nilai contoh (ISN, RTT, throughput) berasal d
 | Ursus | Router | eth0 10.14.2.2/24 (gw 10.14.2.1), eth1 10.14.4.1/24 |
 | Victoria | DHCP server subnet 3.0/24 | eth0 10.14.3.2/24, pool 10.14.3.100-120 |
 | Yan | DHCP server subnet 4.0/24 | eth0 10.14.4.2/24, pool 10.14.4.50-60 |
-| Laterano | Web server, sender, capture sisi server | 10.14.4.15 (reservation dari Yan) |
+| Laterano | Web server, sender, capture sisi server | 10.14.4.15 (reservation Yan) |
 | Columbia | Client (curl, iperf3), capture sisi client | 10.14.3.100 (DHCP Victoria) |
 
-Jalur data: Columbia -> Switch1 -> Lungmen -> RhodesIsland -> Ursus -> Hub1 -> Laterano. Antara Columbia dan Laterano ada **3 router**, jadi TTL turun dari 64 menjadi **61** (bisa dipakai sebagai bukti).
+Jalur: Columbia -> Switch1 -> Lungmen -> RhodesIsland -> Ursus -> Hub1 -> Laterano. Ada **3 router** di antara keduanya, jadi TTL turun dari 64 ke **61**.
+
+Arah gangguan `tc`: `netem` bekerja di **egress** (paket keluar interface).
+- Columbia -> Laterano (data request) keluar RhodesIsland lewat **eth2**.
+- Laterano -> Columbia (data respons) keluar RhodesIsland lewat **eth1**.
+Jadi tiap arah melewati **satu** netem. Loss 5% berarti sekitar 5% per arah, bukan 10%. Delay 100 ms per arah, RTT bertambah sekitar 200 ms.
 
 ---
 
-## 2. Tutorial Persiapan (Pra-Praktikum)
+## 2. Tutorial Persiapan
 
-### 2.1 IP statis router (`/etc/network/interfaces`)
+### 2.1 IP statis router
 
+Edit dengan nano:
 ```
-# RhodesIsland
+nano /etc/network/interfaces
+```
+
+RhodesIsland:
+```
 auto eth0
 iface eth0 inet dhcp
+
 auto eth1
 iface eth1 inet static
     address 10.14.1.1
     netmask 255.255.255.0
+
 auto eth2
 iface eth2 inet static
     address 10.14.2.1
     netmask 255.255.255.0
+```
 
-# Lungmen
+Lungmen:
+```
 auto eth0
 iface eth0 inet static
     address 10.14.1.2
     netmask 255.255.255.0
     gateway 10.14.1.1
+
 auto eth1
 iface eth1 inet static
     address 10.14.3.1
     netmask 255.255.255.0
+```
 
-# Ursus
+Ursus:
+```
 auto eth0
 iface eth0 inet static
     address 10.14.2.2
     netmask 255.255.255.0
     gateway 10.14.2.1
+
 auto eth1
 iface eth1 inet static
     address 10.14.4.1
     netmask 255.255.255.0
 ```
 
-### 2.2 Static routing + NAT
+### 2.2 Static routing dan NAT
 
 ```
 # RhodesIsland
@@ -298,10 +337,25 @@ ip route add 10.14.3.0/24 via 10.14.2.1 dev eth0
 ip route show
 ```
 
-Catatan:
-- Error `File exists` pada `ip route add` aman diabaikan (rute sudah ada).
-- Error `Nexthop has invalid gateway` berarti IP gateway **tidak satu subnet** dengan IP interface yang dipakai. Cek `ip -br addr` (lihat Troubleshooting).
-- Perintah `ip route add`, `ip addr add`, `sysctl -w` **tidak permanen**. Simpan di `init.sh` atau script `/root/setup.sh` per node.
+- `ip_forward=1`: izinkan kernel meneruskan paket antar interface (inilah yang membuat node jadi router). Tanpa ini ping ke router tetangga berhasil, tetapi ping ke subnet seberang gagal.
+- `MASQUERADE`: ganti alamat sumber paket internal dengan alamat `eth0` RhodesIsland saat keluar ke internet (NAT).
+- `File exists` pada `ip route add` aman diabaikan.
+- `Nexthop has invalid gateway`: gateway tidak satu subnet dengan IP interface. Cek `ip -br addr`.
+- Semua `ip ...`, `sysctl -w`, `iptables` **tidak permanen**. Simpan di script setup per node.
+
+Script setup RhodesIsland (buat dengan nano):
+```
+nano /root/setup.sh
+```
+Isi:
+```
+#!/bin/sh
+sysctl -w net.ipv4.ip_forward=1
+ip route add 10.14.3.0/24 via 10.14.1.2 dev eth1
+ip route add 10.14.4.0/24 via 10.14.2.2 dev eth2
+iptables -t nat -A POSTROUTING -j MASQUERADE -s 10.14.0.0/16 -o eth0
+```
+Lalu `chmod +x /root/setup.sh` dan jalankan `/root/setup.sh`.
 
 ### 2.3 DNS di semua node
 
@@ -309,13 +363,18 @@ Catatan:
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
 ping -c 3 google.com
 ```
+`>` menimpa isi berkas. `ping 8.8.8.8` berhasil tapi `ping google.com` gagal berarti masalah DNS. Kalau dua-duanya gagal, masalah jalur internet.
 
 ### 2.4 DHCP dengan Kea
 
-Pasang kalau belum ada (butuh internet): `apk add kea-dhcp4` (Alpine) atau `apt install -y kea-dhcp4-server` (Debian/Ubuntu).
+Pasang (butuh internet): `apk add kea-dhcp4` (Alpine) atau `apt install -y kea-dhcp4-server` (Debian/Ubuntu).
 
-Isi `/etc/kea/kea-dhcp4.conf` di **Yan**:
+Edit config dengan nano:
+```
+nano /etc/kea/kea-dhcp4.conf
+```
 
+Yan:
 ```json
 {
   "Dhcp4": {
@@ -339,43 +398,47 @@ Isi `/etc/kea/kea-dhcp4.conf` di **Yan**:
   }
 }
 ```
+Victoria: subnet `10.14.3.0/24`, pool `10.14.3.100 - 10.14.3.120`, router `10.14.3.1`, tanpa reservation.
 
-Victoria sama, dengan subnet `10.14.3.0/24`, pool `10.14.3.100 - 10.14.3.120`, router `10.14.3.1`, tanpa reservation.
+MAC Laterano: `ip link show eth0` di Laterano (baris `link/ether`).
 
-Cara menjalankan (container GNS3 **tidak punya systemd**, Kea harus dijalankan manual):
-
+Jalankan (container tidak punya systemd):
 ```
 mkdir -p /var/lib/kea /run/kea /var/log/kea
 kea-dhcp4 -t /etc/kea/kea-dhcp4.conf     # tes sintaks, harus tanpa error
 kea-dhcp4 -c /etc/kea/kea-dhcp4.conf &   # jalankan
 ss -ulnp | grep ':67'                    # port 67 harus muncul
 ```
+Client: `udhcpc -i eth0 -v`. Hasil benar: `lease of 10.14.4.15 obtained from 10.14.4.2`.
 
-Cara dapat MAC Laterano: `ip link show eth0` di Laterano (baris `link/ether`).
-
-Client:
-```
-udhcpc -i eth0 -v      # Alpine / BusyBox
-```
-Hasil yang benar: `lease of 10.14.4.15 obtained from 10.14.4.2`.
+`mkdir -p` tidak error kalau direktori sudah ada dan tidak menghapus isinya. Pastikan seluruh perintah `mkdir` ada dalam **satu baris**.
 
 ### 2.5 Web server di Laterano
 
 ```
-apk update && apk add python3
+apk update
+apk add python3
 python3 --version
 mkdir -p /root/myscripts/myweb
-cat > /root/myscripts/start_http.sh << 'EOF'
+nano /root/myscripts/start_http.sh
+```
+Isi script:
+```
 #!/bin/sh
+
 mkdir -p /root/myscripts/myweb
 cd /root/myscripts/myweb
+
 python3 -m http.server 9999 -d /root/myscripts/myweb
-EOF
-chmod +x /root/myscripts/start_http.sh
 ```
+Simpan, keluar, lalu:
+```
+chmod +x /root/myscripts/start_http.sh
+ls -l /root/myscripts
+```
+Harus berupa berkas (`-rwx...`), bukan direktori (`d...`). Salah ketik `mkdir /root/myscripts/start_http.sh` membuat **direktori**; hapus dengan `rmdir /root/myscripts/start_http.sh`.
 
-Berkas uji (jalankan di `/root/myscripts/myweb`, ini perintah terminal, **bukan** isi file):
-
+Berkas uji (perintah terminal, **bukan** isi file; jalankan di `/root/myscripts/myweb`):
 ```
 cd /root/myscripts/myweb
 dd if=/dev/random of=tes1000.bin   bs=1    count=1000
@@ -384,124 +447,137 @@ dd if=/dev/random of=tes50000.bin  bs=50   count=1000
 dd if=/dev/random of=tes5M.bin     bs=5000 count=1000
 ls -l
 ```
-Kalau `/dev/random` macet (kekurangan entropi), ganti dengan `/dev/urandom`.
+Kalau `/dev/random` macet karena entropi, ganti dengan `/dev/urandom`.
 
-Jalankan server supaya tidak mati saat terminal ditutup:
+Jalankan server supaya tidak mati bersama terminal:
 ```
 nohup /root/myscripts/start_http.sh > /tmp/http.log 2>&1 &
-ss -tlnp | grep 9999        # harus ada LISTEN
+ss -tlnp | grep 9999
+nano -v /tmp/http.log
 ```
-Atau pakai `tmux` (split: `Ctrl+b` lalu `%` kiri/kanan, `"` atas/bawah, panah untuk pindah pane).
+(`nano -v` = mode baca saja.) Atau pakai tmux: `tmux`, split `Ctrl+b` lalu `%` (kiri/kanan) atau `"` (atas/bawah), pindah pane dengan `Ctrl+b` lalu panah.
 
-Salah ketik umum: `mkdir start_http.sh` membuat **direktori**. Hapus dengan `rmdir /root/myscripts/start_http.sh`.
-
-### 2.6 Verifikasi awal dari Columbia
-
-```
-ip -br addr                       # eth0 dapat 10.14.3.x
-ping -c 3 10.14.4.15
-curl -sS -o /dev/null -w "size=%{size_download}B speed=%{speed_download}B/s total=%{time_total}s\n" http://10.14.4.15:9999/tes10000.bin
-```
-Browser: `http://10.14.4.15:9999` menampilkan listing keempat berkas.
-
-### 2.7 Perintah curl standar
+### 2.5.1 Perintah curl standar
 
 ```
 curl -sS -o /dev/null -w "size=%{size_download}B speed=%{speed_download}B/s total=%{time_total}s\n" http://10.14.4.15:9999/<berkas>
 ```
 - `-o /dev/null` buang isi, `-s` senyap, `-S` tetap tampilkan error, `-w` cetak ringkasan.
-- **`-o` jangan terlewat.** Tanpa `-o`, `/dev/null` dibaca sebagai URL (`URL rejected: No host part`).
-- Jangan menulis `[IP Prefix]` literal atau tanda `[`: itu notasi IPv6 di URL.
-- `size=0B` berarti gagal connect. Pakai `-sS` untuk melihat penyebabnya.
+- `-o` tidak boleh terlewat (tanpa itu `/dev/null` dibaca sebagai URL).
+- Jangan menulis `[IP Prefix]` atau tanda `[` di URL (notasi IPv6).
+- `size=0B` = gagal connect. Pakai `-sS` untuk melihat penyebabnya.
+
+### 2.6 Verifikasi awal dari Columbia
+
+```
+ip -br addr
+ping -c 3 10.14.4.15
+curl -sS -o /dev/null -w "size=%{size_download}B speed=%{speed_download}B/s total=%{time_total}s\n" http://10.14.4.15:9999/tes10000.bin
+```
+Firefox: `http://10.14.4.15:9999` menampilkan listing keempat berkas.
 
 ---
 
-## 3. Cara Capture Wireshark di GNS3
+## 3. Capture Wireshark di GNS3
 
 1. Klik kanan **link** (Columbia-Switch1 untuk sisi client, Hub1-Laterano untuk sisi server) -> **Start capture**.
-2. Terapkan filter `tcp.port == 9999`, lalu tekan **Enter** (kolom hijau = valid).
-3. **Mulai capture sebelum menjalankan curl.** Satu capture sebaiknya hanya berisi satu download.
-4. Setelah curl selesai: Stop (`Ctrl+E`), lalu Save (`Ctrl+S`). Capture dari GNS3 lewat *standard input*, **hilang kalau jendela ditutup tanpa disimpan**. Judul jendela bertanda `*` berarti belum disimpan.
-5. Mulai capture bersih: di GNS3 klik kanan link -> Stop capture, lalu Start capture lagi.
+2. Filter `tcp.port == 9999` lalu **Enter** (hijau = valid, merah = salah).
+3. **Mulai capture sebelum curl.** Satu capture berisi satu download.
+4. Setelah curl selesai: Stop (`Ctrl+E`), Save (`Ctrl+S`). Capture GNS3 lewat *standard input*, **hilang kalau jendela ditutup tanpa disimpan** (judul bertanda `*` = belum disimpan).
+5. Capture bersih: di GNS3 klik kanan link -> Stop capture, lalu Start capture lagi.
 
 Pengaturan yang membantu:
-- Edit > Preferences > Protocols > TCP: matikan *Relative sequence numbers* untuk melihat nilai asli. Atau baca baris `Sequence Number (raw)`.
-- Tambahkan kolom: klik field di panel detail -> klik kanan -> **Apply as Column** (Seq, Ack, Len, `The RTT to ACK the segment was`, Window).
-- Status bar (paling bawah): `Displayed: N` = jumlah paket yang lolos filter. **Wajib ikut di-screenshot** sebagai bukti jumlah.
-- Panel detail kecil? Seret garis pemisah daftar paket dan panel detail ke atas.
+- Edit > Preferences > Protocols > TCP: matikan *Relative sequence numbers*, atau baca `Sequence Number (raw)`.
+- **Apply as Column**: klik field di panel detail -> klik kanan. Tambahkan Seq, Ack, Len, `The RTT to ACK the segment was`.
+- Status bar (paling bawah): `Displayed: N` = jumlah paket lolos filter. **Wajib ikut di-screenshot.**
+- View > Status Bar kalau tidak tampak. Panel detail kecil: seret pemisahnya ke atas.
 
-Pembagian capture (sesuai catatan di soal):
-- **A:** nomor 1-8 capture Laterano, 9-10 capture Columbia.
-- **B:** nomor 2 dan 5 capture Columbia, selain itu Laterano.
-- **C:** nomor 4, 5, 9 Columbia (4 dan 5 dari output curl), selain itu Laterano.
+Pembagian capture sesuai soal:
+- **A:** nomor 1-8 Laterano, 9-10 Columbia.
+- **B:** nomor 2 dan 5 Columbia, selain itu Laterano.
+- **C:** nomor 4, 5, 9 Columbia, selain itu Laterano.
 
 ---
 
-## 4. Daftar Filter Wireshark dan Hasil yang Seharusnya
+## 4. Tabel Filter Wireshark
 
 | Tujuan | Filter | Hasil yang diharapkan |
 |---|---|---|
-| Hanya koneksi uji | `tcp.port == 9999` | Semua paket download |
-| Satu koneksi spesifik | `tcp.port == 40454` (port klien dari kolom Info) | Satu download saja |
+| Koneksi uji | `tcp.port == 9999` | Semua paket download |
+| Satu koneksi | `tcp.port == 40454` (port klien dari kolom Info) | Satu download |
 | Handshake | `tcp.flags.syn == 1` | SYN dan SYN-ACK |
-| Arah server ke client | `ip.src == 10.14.4.15 && tcp.len > 0` | Segmen data |
-| Arah client ke server | `ip.src == 10.14.3.100` | GET dan ACK |
-| Retransmisi (semua) | `tcp.analysis.retransmission` | A: 0. B/C: > 0 |
+| Data server -> client | `ip.src == 10.14.4.15 && tcp.len > 0` | Segmen data |
+| Paket client | `ip.src == 10.14.3.100` | GET dan ACK |
+| Semua retransmisi | `tcp.analysis.retransmission` | A: 0. B dan C: > 0 |
 | Fast retransmission | `tcp.analysis.fast_retransmission` | Label `[TCP Fast Retransmission]` |
 | Duplicate ACK | `tcp.analysis.duplicate_ack` | `[TCP Dup ACK nnnn#1]`, `#2`, `#3` ... |
+| Segmen hilang tak tertangkap | `tcp.analysis.lost_segment` | `Previous segment not captured` |
 | RTT | `tcp.analysis.ack_rtt` | ACK yang punya data RTT |
 | Bytes in flight | `tcp.analysis.bytes_in_flight` | Proksi cwnd |
-| Segmen hilang tak tertangkap | `tcp.analysis.lost_segment` | `Previous segment not captured` |
-| FIN | `tcp.flags.fin == 1` | Penutupan koneksi |
+| Penutupan | `tcp.flags.fin == 1` | FIN-ACK |
 | Window receiver | `ip.src == 10.14.3.100 && tcp.port == 9999` | Untuk I/O Graph window |
+| Satu seq spesifik | `tcp.seq == 851631` | Segmen asli + retransmisinya |
 
-Catatan filter:
-- Jangan menulis placeholder `<angka>` dengan tanda `<>` di filter. Tulis angkanya saja, misalnya `tcp.seq == 851631`.
-- Filter hanya dihitung hijau jika valid. Merah = salah sintaks.
+Aturan:
+- Jangan menulis placeholder `<angka>` lengkap dengan `<>`. Tulis angkanya saja.
 - Nilai `tcp.seq` di filter mengikuti mode tampilan (relatif atau raw). Konsisten.
 
 ---
 
 ## 5. Bagian A: Transfer Normal (Skenario 1)
 
-**Persiapan:** `tc qdisc show dev eth1` dan `eth2` harus bersih (tanpa `netem` atau `tbf`). Kalau ada: `tc qdisc del dev eth1 root` dan `tc qdisc del dev eth2 root`. Error `Cannot delete qdisc with handle of zero` berarti memang tidak ada aturan, aman.
+### Persiapan
+`tc qdisc show dev eth1` dan `eth2` harus bersih (tanpa `netem`/`tbf`). Kalau ada: `tc qdisc del dev eth1 root` dan `tc qdisc del dev eth2 root`. `Cannot delete qdisc with handle of zero` = memang tidak ada aturan, aman.
 
-**Prediksi ISN:** bukan 0, melainkan angka acak 32-bit.
+### Prediksi (A.4.1), tulis sebelum melihat capture
+> ISN client pada SYN **bukan 0**, melainkan nilai acak 32-bit (0 sampai 4.294.967.295). TCP memilih ISN acak untuk mencegah serangan sequence number prediction/spoofing dan agar segmen lama dari koneksi sebelumnya tidak tercampur dengan koneksi baru (RFC 6528). Wireshark akan menampilkan `Seq=0` hanya karena relative sequence number.
 
-| No | Parameter | Cara baca di Wireshark | Hasil seharusnya |
+Prediksi tambahan yang aman ditulis:
+> Handshake terdiri dari 3 paket (SYN, SYN-ACK, ACK). ACK naik kumulatif, tidak ada retransmisi, RTT beberapa milidetik, dan koneksi ditutup lewat FIN/ACK.
+
+### Tabel A.4.2: apa yang dicari
+
+| No | Parameter | Cara baca | Hasil seharusnya |
 |---|---|---|---|
-| 1 | IP sumber/tujuan | Paket SYN, bagian IP | Src 10.14.3.100 (Columbia), Dst 10.14.4.15 (Laterano), port tujuan 9999, port sumber acak (ephemeral) |
-| 2 | Handshake | 3 paket pertama | SYN (client), SYN-ACK (server), ACK (client) |
-| 3 | ISN client | `Sequence Number (raw)` pada SYN | Angka besar acak (contoh 3308525059). Tampilan `Seq=0` hanyalah relative number |
-| 4 | ISN server | `Sequence Number (raw)` pada SYN-ACK | Beda dari ISN client (contoh 3145121483) |
-| 5 | ACK setelah handshake | Ack pada SYN-ACK dan ACK ketiga | SYN-ACK: Ack = ISN client + 1. ACK ketiga: Ack = ISN server + 1 |
-| 6 | SEQ berikutnya | Dua segmen data berurutan | seq berikutnya = seq + len (contoh 3101 + 1448 = 4549) |
-| 7 | Pola ACK | ACK dari client | Naik kumulatif, tanpa duplikat (contoh 205, 1653, 3101, 4549 ...) |
-| 8 | RTT | `tcp.analysis.ack_rtt` di Laterano | Beberapa ms (jalur stabil) |
-| 9 | Retransmisi | `tcp.analysis.retransmission` di Columbia | 0 |
-| 10 | Penutupan | `tcp.flags.fin == 1` | FIN-ACK, ACK, FIN-ACK, ACK (kadang digabung jadi 3 paket) |
+| 1 | IP sumber/tujuan | Paket SYN, bagian IP | Src 10.14.3.100, Dst 10.14.4.15, port tujuan 9999, port sumber acak |
+| 2 | Handshake | 3 paket pertama | SYN, SYN-ACK, ACK |
+| 3 | ISN client | `Sequence Number (raw)` pada SYN | Angka besar acak |
+| 4 | ISN server | `Sequence Number (raw)` pada SYN-ACK | Beda dari ISN client |
+| 5 | ACK | `Ack` pada SYN-ACK dan ACK ketiga | SYN-ACK: ISN client + 1. ACK ketiga: ISN server + 1 |
+| 6 | SEQ berikutnya | Dua segmen data berurutan di tengah stream | seq berikutnya = seq + len (mis. 3101 + 1448 = 4549) |
+| 7 | Pola ACK | ACK client | Naik kumulatif, tanpa duplikat |
+| 8 | RTT | Nilai `tcp.analysis.ack_rtt` pada satu ACK (Laterano) | Beberapa ms |
+| 9 | Retransmisi | `tcp.analysis.retransmission` (Columbia) | `Displayed: 0` |
+| 10 | Penutupan | `tcp.flags.fin == 1` (Columbia) | FIN-ACK, ACK, FIN-ACK, ACK (bisa tergabung jadi 3 paket) |
 
-Rumus yang sering ditanyakan:
+Rumus:
 - Handshake: SYN memakai 1 nomor urut, jadi Ack = ISN + 1.
-- Respons HTTP: GET 91 byte -> server membalas Ack = 1 + 91 = 92 (relatif).
-- Ukuran file: 10000 B dengan header HTTP 204 B -> ACK akhir relatif = 1 + 204 + 10000 = 10205 (kira-kira).
-- MSS 1460, payload umum 1448 B (karena opsi timestamp). Jumlah segmen data tes5M kira-kira 5.000.000 / 1448 ≈ 3450.
+- GET 91 byte -> server membalas Ack = 1 + 91 = 92 (relatif).
+- ACK akhir relatif file 10000 B dengan header HTTP 204 B = 1 + 204 + 10000 = 10205.
+- Payload umum 1448 B (MSS 1460 dikurangi opsi timestamp). Segmen data tes5M sekitar 5.000.000 / 1448 = 3450.
+- ISN dari hex: 4 byte setelah port tujuan pada header TCP. Contoh `c5 34 16 03` = 0xC5341603 = 3308525059.
+- Nomor `[TCP Dup ACK 1927#1]`: **1927 adalah nomor frame**, bukan nomor Ack.
 
-Cara membaca ISN dari hex (kalau diminta): pada byte setelah port tujuan (4 byte) adalah sequence number. Contoh `c5 34 16 03` = 0xC5341603 = 3308525059.
+### Pertanyaan A.4.2 dan jawaban
 
-### Pertanyaan A.4.2 yang mungkin keluar
+1. **Fungsi sequence dan acknowledgment number?**
+   Sequence number memberi nomor urut tiap byte sehingga penerima dapat mengurutkan data dan mendeteksi hilang/duplikat. Acknowledgment number menyatakan byte berikutnya yang diharapkan sekaligus mengonfirmasi semua byte sebelumnya diterima. Contoh: GET 91 byte dijawab Ack=92.
+2. **Kenapa ACK kumulatif?**
+   Efisien (satu ACK untuk banyak segmen), tahan terhadap ACK hilang (ACK berikutnya mencakup yang sebelumnya), sederhana (satu angka). Kekurangannya tidak memberi tahu segmen setelah celah; dilengkapi opsi SACK.
+3. **Jika segmen hilang di tengah?**
+   Penerima mengirim duplicate ACK untuk byte yang hilang. Pengirim fast retransmit setelah 3 dupACK, atau retransmit saat RTO habis, lalu cwnd dikecilkan. Setelah segmen tiba, ACK kumulatif melompat maju dan data tersusun benar.
+4. **Bukti reliable di Wireshark?**
+   Handshake sukses, seq berurutan (seq + len = seq berikutnya), ACK kumulatif naik tanpa duplikat, retransmisi = 0, `size` curl sama dengan ukuran file, koneksi ditutup lewat FIN/ACK.
 
-1. **Fungsi seq/ack?** Seq memberi nomor urut tiap byte sehingga penerima bisa mengurutkan, mendeteksi hilang/duplikat. Ack menyatakan byte berikutnya yang diharapkan sekaligus konfirmasi semua byte sebelumnya diterima.
-2. **Kenapa ACK kumulatif?** Efisien (satu ACK untuk banyak segmen), tahan terhadap ACK yang hilang (ACK berikutnya mencakup yang sebelumnya), sederhana. Kekurangannya tidak memberi tahu segmen setelah celah; itu dilengkapi opsi SACK.
-3. **Segmen hilang?** Penerima mengirim dupACK; pengirim fast retransmit setelah 3 dupACK atau retransmit saat RTO habis; cwnd dikecilkan; setelah segmen tiba, ACK kumulatif melompat.
-4. **Bukti reliable?** Handshake sukses, seq berurutan, ACK kumulatif naik, retransmisi 0, curl `size` sama dengan ukuran file, koneksi ditutup FIN/ACK.
-5. **Kenapa ISN acak?** Mencegah serangan prediksi/spoofing sequence number dan mencegah segmen lama dari koneksi sebelumnya tercampur (RFC 6528).
-6. **Timer retransmisi (RTO) terlalu pendek/panjang?** Pendek: timeout sebelum ACK tiba, retransmisi tidak perlu (spurious), bandwidth terbuang, cwnd turun. Panjang: saat segmen benar-benar hilang pengirim menunggu lama, link menganggur, waktu transfer membengkak. TCP menghitung RTO adaptif: SRTT + 4×RTTVAR.
+Pertanyaan tambahan dari instruksi A:
+- **Kenapa ISN acak, bukan nol?** Keamanan (mencegah tebakan seq oleh penyerang) dan mencegah segmen lama (delayed duplicate) tercampur dengan koneksi baru.
+- **Kenapa timer retransmisi terlalu pendek atau terlalu panjang sama-sama bermasalah?** Pendek: timer habis sebelum ACK tiba, retransmisi tidak perlu (spurious), bandwidth terbuang, cwnd turun tanpa alasan. Panjang: saat segmen benar-benar hilang, pengirim menunggu lama, link menganggur, transfer lambat. TCP menghitung RTO adaptif: SRTT + 4 x RTTVAR, sedikit di atas RTT.
 
 ---
 
 ## 6. Bagian B: Packet Loss 1% (Skenario 2)
 
+### Setup
 ```
 tc qdisc del dev eth1 root
 tc qdisc del dev eth2 root
@@ -510,48 +586,53 @@ tc qdisc add dev eth2 root netem loss 1%
 tc qdisc show dev eth1
 tc qdisc show dev eth2
 ```
-Output harus memuat `qdisc netem ... loss 1%`. Error `Exclusivity flag on` berarti sudah ada qdisc: `del` dulu.
+Harus tampil `netem ... loss 1%`. `Exclusivity flag on` = sudah ada qdisc, `del` dulu.
 
-Download `tes5M.bin`, dengan capture sudah berjalan.
+Baseline untuk perbandingan: ukur **`tes5M.bin` tanpa loss** (bukan `tes10000.bin`), karena throughput bergantung ukuran file.
 
-**Prediksi:** penerima tidak mengirim NAK, melainkan duplicate ACK (nomor Ack sama berulang). Setelah 3 dupACK, pengirim fast retransmit. Throughput turun, waktu naik karena cwnd dikecilkan.
+### Prediksi (B.1), tulis sebelum melihat capture
+> Saat segmen hilang, penerima (Columbia) tidak mengirim NAK, melainkan **duplicate ACK**: ACK bernomor sama berulang untuk byte yang masih ditunggu, tiap kali menerima segmen yang datang setelah celah. Setelah 3 dupACK, pengirim (Laterano) melakukan **fast retransmit** tanpa menunggu timeout. Segmen retransmisi punya seq sama dengan segmen asli. Throughput turun dan waktu transfer naik karena TCP mengecilkan congestion window setelah loss.
 
-| No | Filter / cara | Hasil seharusnya |
-|---|---|---|
-| 1 | `tc qdisc show` | `loss 1%` di eth1 dan eth2 |
-| 2 (Columbia) | `tcp.analysis.duplicate_ack` | Kelompok dupACK dengan Ack identik, tanpa paket NAK |
-| 3 (Laterano) | `tcp.analysis.retransmission`, lihat Displayed | > 0 (contoh 40-an) |
-| 4 (Laterano) | Klik satu retransmisi, catat seq dan len, lalu `tcp.seq == <seq>` | Dua paket (atau lebih) dengan seq dan len sama: asli (waktu lebih awal) dan retransmisi |
-| 5 (Columbia) | `tcp.analysis.duplicate_ack`, satu kelompok `#1`..`#3`+ | Minimal 3 dupACK berturut-turut |
-| 6 (Laterano) | Kolom RTT, atau Statistics > TCP Stream Graphs > Round Trip Time | RTT cenderung naik di sekitar loss (tulis apa adanya jika tidak jelas) |
-| 7 (Laterano) | `tcp.analysis.fast_retransmission` + dupACK ke-3 | Selisih dupACK#3 ke retransmisi sekitar 1 ms, jauh di bawah RTO minimum Linux (±200 ms) |
-| 8 (Laterano) | Retransmisi dengan jeda ≥ 200 ms dari paket asli | Kalau tidak ada: semua loss dipulihkan lewat dupACK |
-| 9 | curl `speed_download` | Lebih rendah dari baseline `tes5M` tanpa loss |
-| 10 | curl `time_total` | Lebih lama dari baseline |
-| 11 | I/O Graph `MAX(tcp.analysis.bytes_in_flight)`, filter `ip.src == 10.14.4.15 && tcp.port == 40454`, interval 10 ms | Naik, turun tajam setelah loss, naik lagi (pola gergaji) |
+Prediksi tambahan:
+> Karena loss hanya 1% dan data terus mengalir, dupACK cukup banyak sehingga timeout retransmission kemungkinan **tidak muncul**.
 
-**Jebakan penting:**
-- Angka di `[TCP Dup ACK 1927#1]`: **1927 adalah nomor frame ACK asli**, bukan nomor Ack. `#1`, `#2` adalah urutan duplikat. Untuk melihat nomor Ack, tambahkan kolom *Acknowledgment Number*.
-- Baseline untuk perbandingan harus `tes5M.bin` **tanpa loss** (bukan `tes10000.bin`), karena throughput bergantung ukuran file. Contoh hasil lab: tanpa loss 18.320.588 B/s, 0,273 s; loss 1%: 8.790.513 B/s, 0,569 s.
-- `tcp.analysis.rto` adalah nama field yang menyesatkan. Nilai "RTO for this segment" di *SEQ/ACK analysis* hanya selisih waktu dari segmen asli ke retransmisi, **bukan** timer RTO Linux. Retransmisi berlabel non-fast dengan jeda < 1 ms bukan timeout; itu retransmisi saat fase recovery (SACK).
-- Timeout retransmission mungkin tidak muncul; itu valid. Jelaskan: dupACK selalu cukup sebelum timer habis.
-- dupACK yang melebihi `#3` (misal `#29`) wajar: segmen lama masih berdatangan di luar urutan.
-- Loss dipasang di dua interface, jadi dupACK dari Columbia juga bisa hilang sebelum sampai Laterano. Jumlah dupACK di Columbia dan Laterano bisa berbeda.
-- `bytes_in_flight` adalah **proksi**, bukan pengukuran cwnd langsung. Tulis "perkiraan".
+### Tabel B.3: apa yang dicari
 
-### Pertanyaan B.3
+| No | Capture | Filter / cara | Hasil seharusnya |
+|---|---|---|---|
+| 1 | - | `tc qdisc show` | `loss 1%` di eth1 dan eth2 |
+| 2 | Columbia | `tcp.analysis.duplicate_ack` | Kelompok dupACK dengan Ack identik, tanpa NAK. Tampilkan kolom Ack |
+| 3 | Laterano | `tcp.analysis.retransmission` | `Displayed: N` > 0. **Tulis angkanya** |
+| 4 | Laterano | Klik satu retransmisi, catat seq dan len, lalu `tcp.seq == <seq>` | Dua paket seq dan len sama. **Len maksimal sekitar 1448**, bukan angka sebesar jutaan |
+| 5 | Columbia | Satu kelompok dupACK `#1`..`#3`+ | Minimal 3 dupACK berturut-turut. Tulis total dari status bar |
+| 6 | Laterano | Round Trip Time graph, atau kolom RTT | RTT lonjakan di sekitar loss. Tulis nilai terendah dan tertinggi |
+| 7 | Laterano | dupACK ke-3 dan fast retransmission yang menyusul | Selisih sekitar 1 ms (jauh di bawah 200 ms) |
+| 8 | Laterano | Retransmisi dengan jeda >= 200 ms dari aslinya | Kalau tidak ada: jelaskan semua loss dipulihkan lewat dupACK |
+| 9 | Columbia | curl `speed_download` | Lebih rendah dari baseline |
+| 10 | Columbia | curl `time_total` | Lebih lama dari baseline |
+| 11 | Laterano | I/O Graph `MAX(tcp.analysis.bytes_in_flight)`, filter `ip.src == 10.14.4.15 && tcp.port == <port>`, interval 10 ms | Naik, turun tajam setelah loss, naik lagi |
 
-1. **TCP tahu segmen hilang?** Lewat duplicate ACK (3x) dan lewat timeout RTO. TCP tidak memakai NAK.
-2. **Fast retransmit vs timeout?** Fast retransmit dipicu 3 dupACK, retransmisi cepat (sekitar 1 RTT), cwnd turun sekitar setengah. Timeout menunggu RTO (min ±200 ms), dipakai saat dupACK tidak cukup, dan cwnd turun ke 1 MSS (slow start).
-3. **Kenapa throughput turun?** Loss dianggap congestion, cwnd dikecilkan, ada waktu recovery, dan data setelah celah tertahan sampai segmen hilang tiba (head-of-line blocking).
-4. **Bukti reliable?** Retransmisi punya seq dan len sama dengan aslinya, ACK kumulatif melompat setelah retransmisi, curl tetap `size=5000000B`, hanya waktu yang bertambah.
+Jebakan penting:
+- Cara mencari dupACK ke-3: lihat label `#3` pada Info. Lalu `Ctrl+T` (time reference) atau kurangkan `frame.time_relative` manual dengan paket fast retransmission yang menyusul.
+- dupACK `#4`, `#5`, dan seterusnya wajar muncul setelah retransmisi (segmen lama masih berdatangan di luar urutan).
+- `tcp.analysis.rto` adalah **nama field yang menyesatkan**. Nilai "RTO for this segment" di *SEQ/ACK analysis* hanyalah selisih waktu dari segmen asli ke retransmisi, **bukan timer RTO Linux**. Retransmisi non-fast dengan selisih 0,5 ms bukan timeout; itu retransmisi pada fase recovery (SACK).
+- Timeout sungguhan: jeda dari paket asli >= sekitar 200 ms tanpa 3 dupACK sebelumnya.
+- Tidak munculnya timeout adalah hasil sah. Jelaskan alasannya (soal sendiri meminta hal ini).
+- `bytes_in_flight` adalah **proksi**, bukan cwnd langsung. Tulis "perkiraan".
+- Contoh hasil lab: tanpa loss 18.320.588 B/s dan 0,273 s; loss 1% 8.790.513 B/s dan 0,569 s.
+
+### Pertanyaan B.3 dan jawaban
+
+1. **Bagaimana TCP tahu segmen hilang?** Lewat duplicate ACK (penerima mengirim ACK bernomor sama karena menerima segmen di luar urutan) dan lewat timeout RTO (ACK tidak datang sampai timer habis). TCP tidak memakai NAK.
+2. **Timeout retransmission vs fast retransmit?** Fast retransmit dipicu 3 dupACK, retransmisi sekitar 1 RTT, cwnd turun sekitar setengah. Timeout menunggu RTO (minimum Linux sekitar 200 ms), dipakai saat dupACK tidak cukup (mis. segmen terakhir hilang atau retransmisi ikut hilang), cwnd turun ke 1 MSS dan masuk slow start. Timeout lebih lambat dan lebih merugikan.
+3. **Kenapa throughput turun saat loss?** Loss dianggap tanda congestion, cwnd dan threshold dikecilkan sehingga data per RTT berkurang; ada waktu recovery; byte setelah celah tertahan sampai segmen hilang tiba (head-of-line blocking).
+4. **Bagaimana Wireshark menunjukkan TCP tetap reliable?** Retransmisi punya seq dan len sama dengan segmen asli, ACK kumulatif melompat maju setelah segmen pengganti tiba, dan curl tetap `size=5000000B`. Hanya waktu transfer yang bertambah.
 
 ---
 
 ## 7. Bagian C: CUBIC vs Reno (Skenario 3)
 
-Pasang gangguan (sesuai modul: tbf root, netem child):
-
+### Setup (sesuai modul: tbf root, netem child)
 ```
 tc qdisc del dev eth1 root
 tc qdisc del dev eth2 root
@@ -562,10 +643,9 @@ tc qdisc add dev eth2 parent 1:1 handle 10: netem delay 100ms loss 1%
 tc qdisc show dev eth1
 tc qdisc show dev eth2
 ```
-Hasil `tc qdisc show`: `tbf ... rate 2Mbit` dan `netem ... delay 100ms loss 1%`. Cek dengan `ping -c 5 10.14.4.15` dari Columbia: RTT sekitar **200 ms** (100 ms × 2 arah).
+Cek: `ping -c 5 10.14.4.15` dari Columbia harus sekitar **200 ms**.
 
-Algoritma di **Laterano (sender)**:
-
+Algoritma di **Laterano**:
 ```
 # CUBIC
 ip tcp_metrics flush
@@ -578,49 +658,54 @@ sysctl -w net.ipv4.tcp_congestion_control=reno
 ip tcp_metrics flush
 sysctl net.ipv4.tcp_congestion_control
 ```
-Setting berlaku untuk koneksi **baru**, server HTTP tidak perlu restart. Jalankan sysctl di terminal Laterano kedua kalau terminal pertama dipakai server.
+Berlaku untuk koneksi **baru**. Jalankan di terminal kedua kalau terminal pertama dipakai server. Server HTTP tidak perlu restart.
 
-**Prediksi kurva:**
-- Reno: cwnd tumbuh linear (+1 MSS per RTT), turun separuh saat loss, pola gergaji.
-- CUBIC: cwnd turun lebih kecil (faktor 0,7), tumbuh kubik (cepat, melambat dekat W_max, lalu cepat lagi), pulih lebih cepat.
+Instal semua paket **sebelum** memasang gangguan: `tc` dengan delay dan rate 2 Mbps membuat `apk` sangat lambat.
 
-Transfer lama (puluhan detik) karena 2 Mbit/s = maksimum teoritis 250.000 B/s. Tunggu sampai selesai.
+### Prediksi (C.1), tulis sebelum melihat grafik
+> **Reno:** cwnd tumbuh linear (additive increase, +1 MSS per RTT), turun separuh saat loss (multiplicative decrease), pola gergaji (sawtooth).
+> **CUBIC:** cwnd tumbuh mengikuti fungsi kubik (cepat setelah loss, melambat mendekati W_max titik loss sebelumnya, lalu cepat lagi), turun hanya sekitar 30% (faktor 0,7), sehingga pulih lebih cepat daripada Reno.
 
-**Baris tabel C dan cara mengambilnya** (pakai filter, fungsi, dan interval yang **sama** untuk CUBIC dan Reno, satu capture per algoritma):
+Prediksi hasil tabel:
+> Throughput kedua algoritma di bawah batas tbf (2 Mbps = 250.000 B/s) karena loss terus memotong cwnd, dengan CUBIC lebih tinggi dari Reno. RTT rata-rata sekitar 200 ms (dari delay 100 ms x 2), RTT maksimum lebih tinggi karena antrean di tbf. Receive window ditentukan penerima, bukan algoritma.
+
+Dasar perhitungan:
+- BDP = 2.000.000 bit/s x 0,2 s = 400.000 bit = 50.000 byte. cwnd jauh di atas itu hanya menumpuk antrean di tbf (RTT naik, paket bisa dibuang).
+- Maksimum teoritis 250.000 B/s, jadi 5 MB butuh minimal sekitar 20 detik.
+
+### Tabel C.3: apa yang dicari (gunakan filter, fungsi, dan interval yang **sama** untuk CUBIC dan Reno; satu capture per algoritma)
 
 | No | Cara |
 |---|---|
-| 1 | Klik paket data server (`10.14.4.15 -> 10.14.3.100`), lalu Statistics > TCP Stream Graphs > Time Sequence (Stevens). Bandingkan bentuk dengan prediksi, jelaskan bila beda |
-| 2, 3 | Laterano: Statistics > I/O Graphs, filter `tcp.port == 9999 && tcp.analysis.ack_rtt`, Y Field `tcp.analysis.ack_rtt`, **AVG** (rata-rata) dan **MAX** (maksimum), interval besar (1 min atau 10 min) agar satu titik. Klik titik, baca nilai di teks bawah grafik (`Click to select packet ... = ...`). Satuan detik, kalikan 1000 untuk ms |
-| 4, 5 | Output curl di Columbia (`speed`, `total`) |
+| 1 | Klik paket data server (`10.14.4.15 -> 10.14.3.100`), Statistics > TCP Stream Graphs > Time Sequence (Stevens). Bandingkan dengan prediksi, jelaskan bila beda |
+| 2, 3 | Laterano: I/O Graph, filter `tcp.port == 9999 && tcp.analysis.ack_rtt`, Y Field `tcp.analysis.ack_rtt`, **AVG** dan **MAX**, interval besar (10 min) agar satu titik. Klik titik, baca nilai di teks bawah grafik. Satuan detik: kalikan 1000 untuk ms |
+| 4, 5 | Columbia: `speed_download` dan `time_total` dari curl |
 | 6 | Laterano: `tcp.analysis.retransmission`, Displayed |
 | 7 | Columbia: `tcp.analysis.duplicate_ack`, Displayed |
-| 8 | Laterano: I/O Graph `MAX(tcp.analysis.bytes_in_flight)`, filter `ip.src == 10.14.4.15 && tcp.port == 9999` (perkiraan) |
-| 9 | Columbia: I/O Graph `AVG(tcp.window_size)` atau `tcp.window_size_value`, filter `ip.src == 10.14.3.100 && tcp.port == 9999`. **Pilih satu field dan konsisten** |
+| 8 | Laterano: I/O Graph `MAX(tcp.analysis.bytes_in_flight)`. Tulis deskripsi pola (awal-akhir) dan "perkiraan" |
+| 9 | Columbia: I/O Graph `AVG`, filter `ip.src == 10.14.3.100 && tcp.port == 9999`. **Pilih satu field** (`tcp.window_size_value` = nilai mentah header, belum dikali window scale; `tcp.window_size` = nilai sebenarnya) dan konsisten di CUBIC dan Reno. Tulis angka dan satuan byte |
 | 10 | Statistics > TCP Stream Graphs > Throughput, deskripsikan konstan atau berfluktuasi |
 
-Hal penting:
-- `tcp.window_size_value` = nilai mentah di header (maks 65535, belum dikali window scale). `tcp.window_size` = nilai sebenarnya (sudah diskalakan). Tulis di catatan field mana yang dipakai.
-- Receive window ditentukan **sisi penerima (Columbia)**, bukan algoritma sender. Beda nilai CUBIC vs Reno adalah efek auto-tuning buffer.
-- Rata-rata RTT keduanya ≈ 200 ms (dari delay), jadi beda algoritma terlihat di kecepatan pemulihan, bukan di rata-rata RTT.
-- Di I/O Graph, hapus grafik sisa (tombol **-**) supaya skala dan legenda tidak membingungkan. Kalau titik terpecah per menit, naikkan interval ke 10 min.
-- **Jangan klaim mengukur cwnd langsung** dari grafik Stevens atau `bytes_in_flight`. Pakai kata "menyerupai" atau "perkiraan".
-- Loss acak. Satu percobaan bisa menyesatkan; ulangi 2-3 kali jika selisih kecil dan sebutkan batasan ini.
+Aturan:
+- **Jangan menyebut grafik Stevens atau `bytes_in_flight` sebagai pengukuran cwnd langsung.** Pakai "menyerupai" atau "perkiraan".
+- Hapus grafik sisa di I/O Graph (tombol **-**) supaya skala dan legenda tidak membingungkan. Titik terpecah per menit: naikkan interval.
+- Loss acak. Ulangi 2-3 kali kalau selisih kecil, dan sebut itu sebagai batasan.
+- Pengukuran cwnd langsung (hanya pembanding pribadi): `ss -tin dst 10.14.3.100` di Laterano saat transfer; baca `cwnd:` (satuan segmen).
+- Contoh hasil lab: CUBIC 124.358 B/s, 40,2 s, retransmisi 24; Reno 79.578 B/s, 62,7 s, retransmisi 41.
 
-Contoh hasil lab (hanya gambaran): CUBIC 124.358 B/s, 40,2 s, retransmisi 24; Reno 79.578 B/s, 62,7 s, retransmisi 41. Keduanya di bawah 250.000 B/s.
+### Pertanyaan C.3 dan jawaban
 
-### Pertanyaan C.3
-
-1. **Throughput lebih tinggi?** Umumnya CUBIC: cwnd turun lebih kecil (30%) dan tumbuh berdasarkan waktu sejak loss, pulih cepat. Reno turun 50% dan +1 MSS per RTT, lambat di RTT 200 ms. Tulis sesuai hasilmu.
-2. **Hubungan retransmisi dan algoritma?** Keduanya loss-based, retransmisi dipicu loss netem. Jumlah dipengaruhi lamanya transfer dan agresivitas; loss acak sehingga perlu pengulangan untuk kesimpulan kuat.
-3. **Bentuk kurva?** Reno linear bergerigi; CUBIC kubik (cekung lalu cembung di sekitar titik loss sebelumnya). Dengan bottleneck tbf, perbedaan bisa tipis.
-4. **Paling sensitif RTT tinggi?** Reno (pertumbuhan per-RTT). CUBIC bergantung waktu real sejak loss.
-5. **Lebih efisien di latency tinggi?** Biasanya CUBIC, dengan alasan yang sama.
+1. **Throughput lebih tinggi?** Umumnya CUBIC (di lab: 124.358 vs 79.578 B/s). Setelah loss, Reno memotong cwnd 50% dan tumbuh +1 MSS per RTT (lambat di RTT 200 ms). CUBIC memotong sekitar 30% dan tumbuh kembali dengan fungsi kubik dari waktu sejak loss terakhir. Keduanya di bawah 250.000 B/s karena loss. Hasil satu percobaan; loss acak.
+2. **Hubungan retransmisi dan algoritma?** Keduanya loss-based, retransmisi dipicu loss netem. Jumlahnya dipengaruhi lamanya transfer (transfer lebih lama = lebih banyak segmen kena loss) dan agresivitas. Karena loss acak, hubungan sebab-akibat tidak bisa dipastikan dari satu percobaan.
+3. **Beda bentuk kurva cwnd?** Reno linear bergerigi (gergaji); CUBIC kubik (cekung lalu cembung di sekitar titik loss sebelumnya). Dengan bottleneck tbf 2 Mbps dan loss, perbedaan di grafik Stevens bisa tipis; grafik hanya menyerupai pola cwnd.
+4. **Paling sensitif RTT tinggi?** Reno, karena pertumbuhannya dihitung per RTT. CUBIC bergantung waktu real sejak loss, bukan jumlah RTT.
+5. **Lebih efisien di latency tinggi?** Umumnya CUBIC, alasan sama. Sebutkan bukti angka (throughput, waktu, retransmisi).
 
 ---
 
 ## 8. Bagian D: TCP vs UDP (Loss 5%)
 
+### Setup
 ```
 tc qdisc del dev eth1 root
 tc qdisc del dev eth2 root
@@ -629,9 +714,7 @@ tc qdisc add dev eth2 root netem loss 5%
 tc qdisc show dev eth1
 tc qdisc show dev eth2
 ```
-
-Pasang iperf3 dulu **saat jaringan bersih** (`apk add iperf3`) di Laterano dan Columbia.
-
+Pasang iperf3 saat jaringan bersih: `apk add iperf3` di Laterano dan Columbia.
 ```
 # Laterano
 iperf3 -s
@@ -640,208 +723,287 @@ iperf3 -c 10.14.4.15 -t 10
 iperf3 -c 10.14.4.15 -u -b 5M -t 10
 ```
 
-Cara baca ringkasan iperf3:
+### Prediksi
+> **TCP:** throughput turun dan ada retransmisi (Retr > 0) karena TCP memulihkan loss dan mengecilkan cwnd; data sampai utuh; sender dan receiver hampir sama. **UDP:** bitrate sender tetap sekitar 5 Mbit/s, receiver sedikit lebih rendah, ada Lost/Total sekitar 5%, tidak ada pemulihan, ada jitter.
 
-| Sel tabel | Ambil dari |
+Karena netem hanya di egress dan tiap arah melewati satu interface, loss UDP yang tercatat sekitar 5%, bukan 10%.
+
+### Isi tabel D
+
+| Sel | Ambil dari |
 |---|---|
-| Bitrate sender / receiver | Dua baris terakhir berlabel `sender` dan `receiver` |
-| Retransmission (TCP) | Kolom `Retr` baris sender |
-| Lost/Total Datagrams (UDP) | Kolom di baris ringkasan UDP, mis. `12/432 (2.8%)` |
-| Jitter (UDP) | Kolom `Jitter` (ms) |
+| Bitrate sender / receiver | Dua baris ringkasan berlabel `sender` dan `receiver` |
+| Retr (TCP) | Kolom `Retr` baris sender |
+| Lost/Total Datagrams (UDP) | Kolom di ringkasan UDP, ditulis `lost/total (persen)`, mis. `22/432 (5.1%)` |
+| Jitter (UDP) | Kolom `Jitter` (ms), tulis lengkap |
+| Ringkasan respons terhadap loss | Satu atau dua kalimat per protokol |
 
-Hasil seharusnya:
-- TCP: ada `Retr` > 0, throughput turun dari kapasitas link.
-- UDP: sender tetap sekitar 5 Mbit/s; receiver sedikit lebih rendah (sesuai loss); ada Lost/Total dan jitter.
-- Bandingkan angka yang setara: sender dengan sender, receiver dengan receiver. TCP dan UDP punya batas berbeda (UDP dibatasi `-b 5M`, TCP tidak), jadi jangan langsung membandingkan angka TCP dengan 5 Mbit/s tanpa menyebut itu.
+Bandingkan angka yang **setara** (sender dengan sender, receiver dengan receiver). UDP dibatasi `-b 5M`, TCP tidak dibatasi, jadi jangan membandingkan 7,86 dengan 5 secara langsung tanpa menyebut itu. Untuk menyebut TCP "turun", sebaiknya ada baseline TCP tanpa loss (opsional: hapus netem, jalankan `iperf3 -c 10.14.4.15 -t 10`, lalu pasang loss lagi).
 
-### Pertanyaan D.3
+### Pertanyaan D.3 dan jawaban
 
-1. **Kenapa UDP menampilkan persentase loss, TCP tidak?** iperf3 menyisipkan nomor urut di payload UDP, receiver menghitung celahnya. Di TCP, loss ditutup retransmisi di kernel sehingga aplikasi tidak melihat loss; iperf3 hanya melaporkan jumlah `Retr`.
-2. **Kenapa throughput UDP tetap dekat `-b`?** UDP tidak punya congestion control dan retransmisi; sender mengirim sesuai target. Loss hanya terlihat di receiver.
-3. **Kenapa TCP turun?** Loss dianggap congestion, cwnd dikecilkan, ada waktu recovery. UDP tidak memantau loss.
-4. **Aplikasi cocok UDP?** Yang mementingkan latensi rendah dan menoleransi loss: VoIP, video call, live streaming, game online, DNS. Data terlambat tidak berguna, retransmisi TCP menambah delay.
+1. **Kenapa UDP menampilkan persentase loss, TCP tidak?** iperf3 menyisipkan nomor urut di payload tiap datagram UDP; receiver menghitung celahnya sehingga dapat melaporkan Lost/Total. Pada TCP, loss ditutup retransmisi di kernel sehingga aplikasi tidak pernah melihat data hilang; iperf3 hanya melaporkan jumlah `Retr`.
+2. **Kenapa throughput UDP tetap dekat `-b`, TCP turun?** UDP tidak punya congestion control dan retransmisi; sender mengirim sesuai target. Loss hanya terlihat di receiver. TCP mengecilkan cwnd tiap loss sehingga laju kirim tertekan.
+3. **Kenapa TCP turun saat loss, UDP tetap mengirim?** TCP menganggap loss sebagai congestion (cwnd dikecilkan, menunggu pemulihan lewat dupACK dan retransmisi). UDP tidak memantau loss dan tidak mengatur laju.
+4. **Aplikasi cocok UDP?** Yang mementingkan latensi rendah dan menoleransi loss: VoIP, video call, live streaming, game online, DNS. Data terlambat tidak berguna dan retransmisi TCP menambah delay.
 
 ---
 
 ## 9. Bagian E: Tiga Ukuran Berkas (Tanpa Gangguan)
 
-Pastikan `tc qdisc show` bersih dan algoritma Laterano `cubic`. Untuk **tiap** berkas (`tes1000.bin`, `tes10000.bin`, `tes5M.bin`): capture baru, curl, stop, simpan.
+Pastikan `tc qdisc show` bersih dan Laterano `cubic`. Untuk **tiap** berkas (`tes1000.bin`, `tes10000.bin`, `tes5M.bin`): capture baru, curl, Stop, Save.
+
+### Prediksi
+> Jumlah segmen naik kira-kira mengikuti ukuran / 1448, tetapi tidak persis proporsional karena overhead tetap (handshake, GET, header HTTP, FIN). Throughput naik jauh lebih cepat daripada proporsional (berkas kecil selesai di slow start). RTT dan ISN tidak bergantung ukuran. Retransmisi 0 di semua berkas karena link sehat.
+
+### Isi tabel E
 
 | No | Sumber |
 |---|---|
-| 1 | `size=` dari curl |
-| 2 | Statistics > Conversations > TCP, kolom **Packets** (total dua arah, termasuk handshake dan ACK). Sebut cara hitungnya |
+| 1 | `size=` curl |
+| 2 | Statistics > Conversations > TCP, kolom Packets (total kedua arah, termasuk handshake dan ACK). Tulis cara hitungnya |
 | 3 | Laterano: I/O Graph `AVG(tcp.analysis.ack_rtt)`, interval besar |
-| 4, 5 | `speed_download`, `time_total` dari curl |
-| 6, 7 | ISN dari `Sequence Number (raw)` pada SYN dan SYN-ACK **capture berkas itu** (jangan salin dari A) |
-| 8 | Statistics > Endpoints > TCP, baris Columbia, Packets Tx. Catatan: itu semua paket client (termasuk SYN dan GET). Lebih tepat `ip.src == 10.14.3.100 && tcp.flags.ack == 1` |
-| 9 | Laterano: `tcp.analysis.retransmission`, seharusnya Displayed: 0 |
+| 4, 5 | `speed_download`, `time_total` curl |
+| 6, 7 | `Sequence Number (raw)` pada SYN dan SYN-ACK **capture berkas itu**. ISN server **bukan** ISN client + 1 (angka +1 itu adalah nomor Ack) |
+| 8 | Statistics > Endpoints > TCP, Packets Tx Columbia (termasuk SYN dan GET). Lebih tepat: `ip.src == 10.14.3.100 && tcp.flags.ack == 1`, Displayed |
+| 9 | Laterano: `tcp.analysis.retransmission`, tulis angka `0` atau jumlahnya |
 
-Contoh hasil lab: tes1000 13 segmen, tes10000 22 segmen, tes5M 4036 segmen; throughput 145.053, 1.769.911, 18.436.374 B/s.
+Kalau tes5M memiliki retransmisi padahal tanpa gangguan: cek `tc qdisc show` (mungkin `netem`/`tbf` belum dilepas). Kalau bersih, kemungkinan buffer overflow di router saat burst (TCP mengirim cepat melebihi kapasitas antrean). Tulis penjelasannya di laporan.
 
-**Kalau tes5M punya retransmisi (mis. 116) padahal tanpa gangguan:** cek dulu `tc qdisc show` (mungkin `netem`/`tbf` belum dilepas). Kalau bersih, kemungkinan buffer overflow di router saat burst 5 MB (TCP agresif mengirim cepat melebihi kapasitas antrean). Tulis penjelasan itu, bukan menyembunyikannya.
+### Pertanyaan E.2 dan jawaban
 
-### Pertanyaan E.2
+1. **Proporsional?** Tidak. Segmen naik mengikuti ukuran tetapi ada overhead tetap; berkas besar mendekati ukuran / MSS. Throughput naik jauh lebih cepat dari proporsional karena berkas kecil selesai sebelum cwnd tumbuh dan waktunya didominasi handshake dan request. RTT bisa naik sedikit pada berkas besar karena antrean (dan retransmisi bila ada).
+2. **Yang relatif tetap?** RTT dasar jalur (ditentukan propagasi dan pemrosesan router, bukan ukuran), ISN (acak per koneksi), status retransmisi (0 pada link sehat), dan waktu total berkas kecil (didominasi handshake dan RTT).
+3. **`time_total` vs RTT?** `time_total` mencakup handshake, request HTTP, seluruh transfer, sampai selesai. RTT hanya waktu satu segmen sampai ACK-nya kembali. Untuk berkas besar `time_total` jauh lebih besar dari RTT karena butuh banyak round trip.
 
-1. **Proporsional?** Tidak. Segmen naik mengikuti ukuran tapi ada overhead tetap (handshake, GET, FIN), jadi berkas kecil tidak proporsional; berkas besar mendekati ukuran/MSS. Throughput naik jauh lebih cepat dari proporsional karena berkas kecil selesai di fase slow start dan waktunya didominasi handshake. RTT bisa naik sedikit pada berkas besar karena antrean.
-2. **Relatif tetap?** RTT dasar jalur (propagasi), ISN (acak, tidak terkait ukuran), status retransmisi (0 bila link sehat).
-3. **`time_total` vs RTT?** `time_total` mencakup handshake, request, seluruh transfer, dan penutupan; RTT hanya waktu satu segmen sampai ACK-nya kembali (satu round trip).
+Indikator reliability yang perlu disebut di kesimpulan: retransmisi 0 (atau penjelasannya), ACK kumulatif, ukuran download sama dengan ukuran berkas.
 
 ---
 
-## 10. Troubleshooting
+## 10. Pertanyaan Lisan yang Mungkin Ditanyakan
 
-### 10.1 Cara cepat mendiagnosis
+**Routing dan jaringan**
+- *Apa fungsi `ip_forward`?* Mengizinkan kernel meneruskan paket antar interface sehingga node bertindak sebagai router.
+- *Apa itu MASQUERADE?* NAT dinamis: mengganti IP sumber paket internal dengan IP interface keluar.
+- *Kenapa perlu static route?* Router tidak tahu subnet yang tidak terhubung langsung; rute diberi tahu manual (`ip route add <subnet> via <next-hop>`).
+- *Kenapa TTL 61?* TTL awal 64 dikurangi satu per router yang dilewati; ada 3 router.
+- *Kenapa DHCP Discover tidak melewati router?* Broadcast tidak diteruskan router; perlu relay atau server di segmen yang sama.
+- *Kenapa Kea harus dijalankan manual?* Container GNS3 tidak memakai systemd.
+- *Kenapa Laterano selalu 10.14.4.15?* Reservation di Kea berdasarkan MAC.
+
+**TCP**
+- *Tiga flag handshake?* SYN, SYN-ACK, ACK.
+- *Kenapa SYN memakai satu nomor urut?* Agar SYN dapat di-ACK (Ack = ISN + 1).
+- *Apa itu MSS?* Ukuran maksimum payload per segmen (1460 untuk Ethernet 1500 MTU).
+- *Apa itu window scale?* Opsi untuk memperbesar window di atas 65535 (nilai mentah dikali faktor skala).
+- *Apa itu SACK?* Penerima memberi tahu blok data yang sudah diterima setelah celah, sehingga hanya segmen hilang yang dikirim ulang.
+- *Slow start vs congestion avoidance?* Slow start: cwnd berlipat tiap RTT sampai ssthresh atau loss. Congestion avoidance: cwnd tumbuh lambat (Reno +1 MSS per RTT).
+- *Apa itu BDP?* Bandwidth x RTT, jumlah data yang "muat" di jalur.
+- *Apa itu head-of-line blocking?* Data setelah celah tidak bisa diserahkan ke aplikasi sebelum segmen yang hilang tiba.
+- *Apa itu delayed ACK?* Penerima menunda ACK sebentar atau menggabungkan untuk dua segmen.
+- *Apa itu RTO?* Batas waktu menunggu ACK sebelum retransmit; `SRTT + 4 x RTTVAR`, minimum Linux sekitar 200 ms.
+- *Kenapa curl `time_total` != RTT?* `time_total` seluruh transaksi, RTT satu round trip.
+
+**tc dan alat**
+- *Apa itu netem?* Modul emulasi jaringan (delay, loss, dll). *tbf?* Token bucket filter, membatasi rate.
+- *Kenapa gangguan dipasang di dua interface?* Supaya kedua arah (data dan ACK) terkena gangguan.
+- *Kenapa `tc qdisc del ... root` penting sebelum skenario baru?* Agar aturan lama tidak bertumpuk dan hasil tidak tercampur.
+- *Beda `tcp.window_size` dan `tcp.window_size_value`?* Yang kedua nilai mentah header (belum dikali scale).
+- *Kenapa bytes in flight bukan cwnd?* Dipengaruhi juga receive window, bottleneck, dan ketersediaan data.
+
+---
+
+## 11. Koreksi Laporan (temuan dari file laporan yang kamu kirim)
+
+Saya tidak dapat membuka isi screenshot di laporan, jadi daftar ini hanya berdasarkan **teks**. Cek screenshot-nya sendiri.
+
+### Bagian A (A.3 dan A.4)
+- Hapus sisa blok `put your answer here (and screenshot)` di A.3.2, A.3.3, A.3.4, A.3.5.
+- A.3.4 meminta bukti `kea-dhcp4` berjalan (mis. `ss -ulnp | grep ':67'`) dan `udhcpc -i eth0` serta `ip -br addr` pada Laterano dan Columbia. Pastikan semuanya ada di screenshot.
+- A.4.2 no. 8: nilai yang diminta adalah `tcp.analysis.ack_rtt` pada salah satu ACK di Laterano. Tulis nilai yang tertera di *SEQ/ACK analysis* (bukan hitungan manual timestamp), lalu diskusi timer.
+- A.4.2 no. 10: jawaban masih umum. Tulis siapa yang mengirim FIN lebih dulu, nomor frame FIN-ACK dan ACK, dan apakah terlihat 4 atau 3 paket (jika tergabung, jelaskan).
+
+### Bagian B
+- **B no. 4: `len = 1421842630` salah.** Panjang segmen TCP tidak mungkin sebesar itu (maksimal sekitar 1448-1460). Angka itu kemungkinan nilai field lain (mis. timestamp). Ambil dari baris `TCP Segment Len` (kemungkinan 1448) dan ganti di kedua baris (asli dan retransmisi). Tulis juga nomor frame (4982 dan 4990).
+- B no. 3: hanya ada screenshot. Tulis angka `Displayed` jumlah retransmisi.
+- B no. 6: belum ada nilai. Tulis RTT terendah dan tertinggi (atau satu nilai sebelum dan sesudah loss), atau jelaskan bahwa pola hanya dibaca dari grafik.
+- B no. 2 dan 5 memakai kelompok dupACK 4290, sedangkan no. 7 memakai kelompok 4304. Itu bisa dua kejadian loss berbeda. Tulis eksplisit, atau pakai kejadian yang sama untuk no. 5 dan no. 7 supaya konsisten.
+- B no. 8: sudah baik, tapi sebut bahwa label `rto` pada Wireshark tidak berarti timer Linux (lihat bagian 6).
+- Tambahkan angka throughput baseline `tes5M` tanpa loss di no. 9 dan 10 dengan screenshot terpisah (sudah ada).
+
+### Bagian C
+- **C.2: screenshot Reno belum ada** (`put screenshot here`). Tambahkan screenshot perintah `sysctl` Reno dan curl Reno.
+- **C.3 no. 2 dan 3: satuan.** Header kolom "ms", tetapi tertulis detik. Tulis 205 ms dan 203 ms (rata-rata), 400 ms dan 500 ms (maksimum).
+- **Kolom "Catatan analisis" berisi salinan instruksi**, bukan analisis. Tulis analisis sendiri per baris (mis. no. 2: RTT kedua algoritma sekitar 200 ms karena delay 100 ms x 2; no. 3: RTT maksimum lebih tinggi karena antrean di tbf; no. 4 dan 5: CUBIC lebih cepat; no. 6 dan 7: perbandingan jumlah).
+- No. 4 dan 5: catatan kosong. Isi.
+- **No. 9: nilai angka tidak tertulis** di sel CUBIC dan Reno (hanya gambar), dan pada pengerjaan sebelumnya CUBIC dan Reno diukur dengan field berbeda. Pakai **satu field** untuk keduanya dan tulis angka dengan satuan byte, serta catat apakah sudah dikali window scale.
+- No. 8: tulis deskripsi pola (awal-akhir) dan kata "perkiraan", bukan hanya gambar.
+- **Inkonsistensi:** C.3 no. 1 menyatakan pola gergaji Reno **tidak jelas** di grafik, tetapi jawaban pertanyaan 3 menyatakan Reno "tampak gergaji". Samakan: tulis bahwa secara teori Reno bergerigi, tetapi pada grafik Stevens bentuknya hanya menyerupai karena bukan nilai cwnd langsung.
+- Jawaban pertanyaan 2 menyebut CUBIC "mengirim lebih agresif sehingga dupACK lebih banyak" sebagai penyebab. Itu dugaan. Tulis sebagai kemungkinan, bukan kepastian.
+
+### Bagian D
+- **D.1 kosong.** Tambahkan screenshot `tc qdisc show` eth1 dan eth2 dengan `loss 5%`.
+- **Lost/Total Datagrams hanya `total datagram=432`.** Tulis lengkap: jumlah hilang, total, dan persen (mis. `x/432 (y%)`).
+- Jitter: tertulis `0,339 ms di` (kalimat terpotong). Lengkapi.
+- Jawaban D.3 no. 1 masih ada `...` placeholder: isi jumlah hilang dan persen.
+- Receiver UDP 4,74 dari sender 5 Mbit/s berarti sekitar 5% loss, sesuai netem 5% per arah. Sebut itu.
+- Tambahkan baris yang menjelaskan retransmisi TCP (354) dan bahwa receiver TCP sedikit lebih rendah dari sender.
+- Tambahkan baseline TCP tanpa loss bila ingin menyatakan TCP "turun".
+
+### Bagian E
+- **No. 7 tes1000: `1579359896` adalah ISN client + 1** (angka yang biasanya berupa nomor Ack, bukan sequence number server). ISN server tidak mungkin berbeda persis 1 dari ISN client. Baca ulang `Sequence Number (raw)` pada paket **SYN-ACK** tes1000.
+- No. 9 tes1000 dan tes10000: hanya screenshot. Tulis `0 retransmisi (Displayed: 0)`.
+- **No. 9 tes5M: 116 retransmisi** padahal skenario tanpa gangguan. Cek `tc qdisc show` dan tulis penjelasan (netem/tbf sisa, atau overflow buffer router saat burst).
+- No. 3 tes5M (5,291 ms): kemungkinan ikut dipengaruhi retransmisi dan antrean. Sebut di catatan.
+- No. 8: angka (6, 11, 3509) adalah Packets Tx client (termasuk SYN dan GET), bukan murni ACK. Tulis cara hitungnya.
+- No. 2: tulis cara hitung (total paket kedua arah, termasuk handshake dan ACK).
+- Kesimpulan E.2 perlu menyebut indikator reliability (retransmisi, ACK, ukuran file) sesuai soal.
+
+### Umum
+- Typo: "retranmisi" -> "retransmisi".
+- Kolom tabel Markdown: satu baris tabel = satu baris teks, Enter diganti `<br>`, tanpa baris kosong, setiap baris diawali dan diakhiri `|`.
+- Pisahkan bukti: normal, loss 1%, CUBIC, Reno, TCP, UDP.
+- Isi dengan hasil aktual. Hapus semua `put your answer here`.
+
+---
+
+## 12. Troubleshooting
+
+### 12.1 Alur diagnosis
 
 ```
-ip -br addr          # IP dan status interface
-ip route             # default route dan rute antar subnet
-ping -c 3 <gateway>  # jangkauan tetangga
-ping -c 3 8.8.8.8    # internet (IP)
-ping -c 3 google.com # DNS
-ss -tlnp             # port yang listen (server)
-ss -ulnp             # port UDP (DHCP port 67)
+ip -br addr
+ip route
+ping -c 3 <gateway>
+ping -c 3 8.8.8.8
+ping -c 3 google.com
+ss -tlnp
+ss -ulnp
 ```
-Prinsip: uji dari yang terdekat ke terjauh. Gateway -> router tengah -> tujuan -> port aplikasi.
+Uji dari terdekat ke terjauh: gateway -> router tengah -> tujuan -> port aplikasi.
 
-### 10.2 RhodesIsland (router NAT) tidak dapat IP / tidak ada internet
+### 12.2 RhodesIsland tidak dapat IP dari NAT / tidak ada internet
 
-RhodesIsland eth0 harus DHCP dari NAT node. Cek berurutan:
-
-1. **Node NAT sudah terhubung dan menyala di GNS3?** Link dari NAT ke eth0 RhodesIsland harus hijau.
-2. **Interface up?** `ip link set eth0 up`
-3. **Minta DHCP manual:** `udhcpc -i eth0 -v` (Alpine) atau `dhclient -v eth0` (kalau ada). Lalu `ip -br addr` dan `ip route` (harus ada `default via ...`).
-4. **Tetap tidak dapat IP?** Masalahnya biasanya di sisi NAT/virtual network pada GNS3 VM atau host (lihat 10.3).
-5. **Dapat IP tapi tidak bisa ping 8.8.8.8:** cek `ip route` (default route), lalu forwarding dan NAT:
+1. Node NAT di GNS3 menyala dan link ke eth0 RhodesIsland hijau.
+2. `ip link set eth0 up`
+3. `udhcpc -i eth0 -v`, lalu `ip -br addr` dan `ip route` (harus ada `default via ...`).
+4. Tetap tidak dapat IP: masalah di jaringan NAT/virtual pada GNS3 VM atau host (lihat 12.3).
+5. Dapat IP tapi tidak bisa `ping 8.8.8.8`: periksa default route, lalu:
    ```
    sysctl -w net.ipv4.ip_forward=1
    iptables -t nat -A POSTROUTING -j MASQUERADE -s 10.14.0.0/16 -o eth0
    iptables -t nat -L -n -v
    ```
-6. **Ping IP bisa, nama gagal:** `echo "nameserver 8.8.8.8" > /etc/resolv.conf`
-7. Node lain (Yan, Laterano, Columbia) tidak punya internet padahal RhodesIsland punya: cek **rute di router tengah**, default gateway node itu, dan `ip_forward` di Lungmen dan Ursus. Ingat `apk update` / `apk add` butuh internet.
+6. Ping IP bisa, nama gagal: `echo "nameserver 8.8.8.8" > /etc/resolv.conf`.
+7. Node lain tidak punya internet padahal RhodesIsland punya: cek default gateway node itu, rute dan `ip_forward` di Lungmen dan Ursus.
 
-Catatan: node NAT di GNS3 (Linux) biasanya memakai jaringan virtual `virbr0` dari libvirt. Kalau `virbr0` tidak aktif, node yang tersambung ke NAT tidak mendapat IP.
+### 12.3 `virsh` (libvirt) dan jaringan NAT
 
-### 10.3 `virsh` (libvirt / VM GNS3) bermasalah
-
-Catatan: bagian ini berlaku jika GNS3 VM atau jaringan NAT-nya berjalan lewat libvirt/KVM. Perintah di bawah dijalankan di mesin host Linux, bukan di dalam container. Sesuaikan nama VM dengan hasil `virsh list --all`. **Tambahkan error asli yang kamu alami di sini supaya README ini sesuai setupmu.**
+Berlaku kalau GNS3 VM atau jaringan NAT-nya berjalan lewat libvirt/KVM (jalankan di **host Linux**). Bagian ini saya tulis dari perkiraan; **tambahkan error dan perintah yang benar-benar kamu pakai**. Kalau GNS3 VM di VMware atau VirtualBox, perintah `virsh` tidak berlaku.
 
 ```
-sudo virsh list --all                 # lihat VM dan statusnya
-sudo virsh destroy <nama-vm>          # matikan paksa (setara cabut listrik, bukan hapus VM)
+sudo virsh list --all                 # VM dan statusnya
+sudo virsh destroy <nama-vm>          # matikan paksa (bukan menghapus VM)
 sudo virsh start <nama-vm>            # nyalakan lagi
-sudo virsh net-list --all             # lihat jaringan virtual
+sudo virsh net-list --all             # jaringan virtual
 sudo virsh net-start default          # nyalakan jaringan default (virbr0)
-sudo virsh net-autostart default      # supaya otomatis aktif tiap boot
-sudo systemctl restart libvirtd       # restart layanan libvirt
-ip -br addr show virbr0               # virbr0 harus UP dengan IP 192.168.122.1
+sudo virsh net-autostart default      # aktif otomatis tiap boot
+sudo systemctl restart libvirtd       # restart libvirt
+ip -br addr show virbr0               # virbr0 harus UP
 ```
+- `virsh destroy` hanya mematikan paksa. Penghapusan definisi adalah `virsh undefine`; jangan dipakai kecuali yakin.
+- Pola: `destroy` -> pastikan jaringan `default` aktif -> `start` -> buka ulang project GNS3.
 
-- `virsh destroy` **tidak menghapus** VM, hanya mematikan paksa. Penghapusan definisi adalah `virsh undefine` (jangan dipakai kecuali yakin).
-- Pola yang membantu: matikan VM (`destroy`) -> pastikan jaringan `default` aktif -> nyalakan VM (`start`) -> buka ulang project GNS3.
-- Kalau GNS3 VM berjalan di VMware/VirtualBox (bukan libvirt), perintah `virsh` tidak berlaku. Restart VM lewat VMware/VirtualBox.
+### 12.4 Error `409 Conflict ... container name already in use`
 
-### 10.4 Error `409 Conflict ... container name already in use`
-
-Container lama dengan nama sama tersisa (biasanya GNS3 tidak ditutup dengan bersih). Jalankan di shell **GNS3 VM** (SSH ke VM, atau konsol VM -> Shell):
-
+Container lama tersisa. Di shell **GNS3 VM**:
 ```
 docker ps -a --filter "name=<id-project>"
 docker rm -f <id-container>
-# hapus semua container project ini:
 docker rm -f $(docker ps -aq --filter "name=<id-project>")
 ```
-- `id-project` adalah bagian UUID di nama container (`GNS3.<Node>.<id-project>`).
-- Jangan memakai `filter "name=GNS3"` untuk menghapus semuanya, itu menghapus container project lain juga.
-- Kalau `docker` dijalankan di PowerShell Windows dan muncul `failed to connect to the docker API ... dockerDesktopLinuxEngine`, berarti Docker Desktop tidak jalan. Kalau GNS3 memakai GNS3 VM, container ada di dalam VM, bukan di Docker Desktop Windows.
+- `id-project` = UUID pada nama `GNS3.<Node>.<id-project>`.
+- Jangan memakai `filter "name=GNS3"` (menghapus project lain juga).
+- Di PowerShell Windows, `failed to connect to the docker API ... dockerDesktopLinuxEngine` = Docker Desktop tidak jalan. Kalau GNS3 memakai GNS3 VM, container ada **di dalam VM**.
+- Pencegahan: **Stop all nodes**, tutup project, baru shutdown.
 
-Pencegahan: sebelum mematikan komputer, **Stop all nodes**, tutup project, baru shutdown.
+### 12.5 Setelah GNS3 dinyalakan ulang
 
-### 10.5 Setelah GNS3 dinyalakan ulang / container dibuat ulang
+Hilang: IP/rute manual, `sysctl -w`, `iptables`, proses (Kea, server HTTP, iperf3), `tc`, paket `apk add`.
+Biasanya aman: topologi, `/etc/...`, `/root/...`.
 
-Yang **hilang**: IP yang diset manual, rute manual, `sysctl -w`, `iptables`, proses (Kea, python server, iperf3), `tc`, paket yang dipasang `apk add` (python3, tmux, kea, iperf3).
-Yang biasanya **aman**: topologi, `/etc/...`, `/root/...` (mis. `/root/myscripts`, config Kea).
-
-Checklist urutan menyalakan:
-
+Urutan:
 1. Start semua node.
-2. Router: IP (kalau tidak di `interfaces`), `ip_forward`, rute, NAT (RhodesIsland). Pasang `tc` hanya saat skenario.
-3. Yan: `apk add kea-dhcp4` (jika `command not found`), `mkdir -p /var/lib/kea /run/kea /var/log/kea`, jalankan Kea.
-4. Laterano: `udhcpc -i eth0` (harus 10.14.4.15), `apk add python3` jika hilang, `nohup /root/myscripts/start_http.sh ... &`.
-5. Columbia: `ip -br addr` (10.14.3.x), default route, `ping 10.14.4.15`.
-6. Uji `curl` ke `tes10000.bin`.
+2. Router: IP, `ip_forward`, rute, NAT (jalankan `/root/setup.sh`).
+3. Yan: `apk add kea-dhcp4` bila `command not found`, `mkdir -p /var/lib/kea /run/kea /var/log/kea`, jalankan Kea.
+4. Laterano: `udhcpc -i eth0` (harus 10.14.4.15), `apk add python3` bila hilang, `nohup /root/myscripts/start_http.sh > /tmp/http.log 2>&1 &`.
+5. Columbia: `ip -br addr`, default route, `ping 10.14.4.15`.
+6. Uji curl `tes10000.bin`.
 
-Buat `/root/setup.sh` per node supaya tinggal dijalankan (simpan di `/root`, persisten).
+### 12.6 DHCP client tidak dapat IP
 
-### 10.6 DHCP client tidak mendapat IP
-
-- **Discover terlihat di `tcpdump` server tapi tidak ada Offer:** hampir pasti **Kea tidak berjalan**. `ss -ulnp | grep ':67'` kosong -> jalankan Kea. `tcpdump` melihat paket walau tidak ada proses yang membalas.
-- `kea-dhcp4: command not found`: paket hilang, `apk add kea-dhcp4` (butuh internet; lepas `tc` kalau lambat).
-- Kea jalan tapi diam: IP `eth0` server harus berada di subnet yang dideklarasikan (`10.14.4.2/24` untuk subnet 4.0/24). Cek log di foreground: `kea-dhcp4 -c /etc/kea/kea-dhcp4.conf` (pesan seperti `no suitable subnet`).
-- Config JSON rusak: `kea-dhcp4 -t /etc/kea/kea-dhcp4.conf`. Output terpotong saat copy-paste (tanda `>`) bisa merusak JSON.
+- Discover terlihat di `tcpdump` server tapi tidak ada Offer: **Kea tidak berjalan** (`ss -ulnp | grep ':67'` kosong). `tcpdump` melihat paket walau tidak ada proses yang membalas.
+- `kea-dhcp4: command not found`: `apk add kea-dhcp4`.
+- Kea jalan tapi diam: IP `eth0` server harus di subnet yang dideklarasikan (10.14.4.2/24). Jalankan Kea di foreground untuk melihat log (`no suitable subnet`).
+- JSON rusak: `kea-dhcp4 -t /etc/kea/kea-dhcp4.conf`.
 - `dhclient: command not found`: pakai `udhcpc -i eth0 -v`.
-- Client beda segmen dengan server: DHCP broadcast tidak melewati router, perlu relay. Pada topologi ini setiap subnet punya DHCP server sendiri.
-- Laterano tidak dapat 10.14.4.15: cek MAC di `reservations` sama dengan `ip link show eth0` di Laterano.
+- Laterano tidak dapat 10.14.4.15: MAC di `reservations` harus sama dengan `ip link show eth0`.
 
-### 10.7 `curl` gagal
+### 12.7 curl gagal
 
 | Gejala | Penyebab | Solusi |
 |---|---|---|
-| `size=0B total=0.000000s` tanpa pesan | `-s` menyembunyikan error | Pakai `-sS` |
-| `URL rejected: No host part` | `-o` terlewat, atau `[` tersisa di URL | Perintah standar bagian 2.7 |
-| `Connection refused` (cepat, ~1 RTT) | Server HTTP tidak jalan | Di Laterano: `ss -tlnp \| grep 9999`; jalankan server via `nohup` |
-| `Failed to connect ... after 0 ms` | Rute atau IP client tidak ada | `ip -br addr`, `ip route` di Columbia |
-| `Connection timed out` | Jalur putus, rute router hilang, atau `tc` terlalu ketat | Ping dulu; periksa rute router; lepas `tc` untuk tes |
-| `python3: command not found` | Paket hilang setelah container dibuat ulang | `apk add python3` (lepas `tc` supaya cepat) |
+| `size=0B` tanpa pesan | `-s` menyembunyikan error | Pakai `-sS` |
+| `URL rejected: No host part` | `-o` terlewat atau `[` tersisa | Perintah standar 2.5.1 |
+| `Connection refused` | Server HTTP tidak jalan | `ss -tlnp \| grep 9999` di Laterano, jalankan lewat `nohup` |
+| `Failed to connect ... after 0 ms` | IP/rute client hilang | `ip -br addr`, `ip route` di Columbia |
+| `Connection timed out` | Jalur putus atau `tc` terlalu ketat | Ping, cek rute router, lepas `tc` untuk tes |
+| `python3: command not found` | Paket hilang | `apk add python3` (lepas `tc` agar cepat) |
 
-Ping berhasil belum membuktikan port 9999 terbuka: ping hanya menguji IP. `Connection refused` berarti paket sampai tapi tidak ada proses yang listen.
+Ping berhasil tidak membuktikan port 9999 terbuka. `Connection refused` berarti paket sampai tetapi tidak ada proses yang listen.
 
-### 10.8 `tc` (netem/tbf)
+### 12.8 tc
 
-- Cek aturan: `tc qdisc show dev eth1` dan `eth2`.
-- Hapus semua: `tc qdisc del dev eth1 root` dan `tc qdisc del dev eth2 root`. Ini juga menghapus child (tbf/netem).
-- `Error: Exclusivity flag on` -> sudah ada qdisc, `del` dulu.
-- `Cannot delete qdisc with handle of zero` -> tidak ada aturan, aman.
-- **Pasang `tc` di Skenario 3 membuat `apk`/`apt` dan ping sangat lambat.** Instal semua paket (python3, kea, iperf3, tmux) **sebelum** memasang gangguan.
-- Wajib lepas `tc` sebelum mengukur baseline atau sebelum bagian berikutnya. Tiap bagian harus dimulai dari kondisi yang jelas.
-- Kalau SYN tidak sampai pada Skenario 3: tbf dengan `latency` kecil bisa membuang paket saat antrean penuh; coba `latency` lebih besar. Modul memakai `latency 100ms`.
+- `tc qdisc show dev eth1` dan `eth2` untuk cek.
+- `tc qdisc del dev ethX root` menghapus semua (termasuk child).
+- `Exclusivity flag on`: sudah ada qdisc, `del` dulu. `Cannot delete qdisc with handle of zero`: tidak ada aturan.
+- Pasang `tc` membuat `apk`/`apt` sangat lambat: instal paket **sebelum** gangguan.
+- Wajib lepas `tc` sebelum mengukur baseline atau berpindah bagian.
 
-### 10.9 Wireshark
+### 12.9 Wireshark
 
 | Masalah | Solusi |
 |---|---|
-| Handshake tidak terlihat | Capture dimulai setelah curl, atau terscroll. Mulai capture dulu, `Ctrl+Home` |
-| Hasil capture hilang | Jendela ditutup tanpa Save. Selalu `Ctrl+S` |
-| Tidak ada paket | Link salah di-capture; hapus filter sementara |
-| Filter kosong padahal seharusnya ada | Belum menekan Enter, field salah, atau capture salah (Columbia vs Laterano) |
-| Dua koneksi dalam satu capture | Pakai `tcp.port == <port klien>` |
-| Seq selalu 0 | Relative numbers aktif; baca `Sequence Number (raw)` |
-| Kolom Info terpotong | Tambahkan kolom Ack/Seq/Len, lebarkan kolom |
-| I/O Graph skala aneh / banyak garis | Hapus grafik sisa; naikkan interval |
-| Angka I/O Graph janggal | Periksa Y Axis (AVG bukan SUM), Y Field, filter |
-| Tombol start capture (sirip hiu) tidak jalan | Stop capture di GNS3, lalu Start lagi |
-| Status bar tidak terlihat | View > Status Bar, maksimalkan jendela |
+| Handshake tidak terlihat | Capture dimulai setelah curl, atau daftar terscroll (`Ctrl+Home`) |
+| Hasil capture hilang | Jendela ditutup tanpa Save |
+| Tidak ada paket | Link salah di-capture, hapus filter sementara |
+| Filter kosong | Belum Enter, field salah, atau capture salah (Columbia vs Laterano) |
+| Dua koneksi dalam satu capture | Tambahkan `tcp.port == <port klien>` |
+| Seq selalu 0 | Relative numbers aktif, baca `Sequence Number (raw)` |
+| Info terpotong | Tambahkan kolom Ack/Seq/Len, lebarkan kolom |
+| I/O Graph skala aneh | Hapus grafik sisa, periksa AVG (bukan SUM), Y Field, filter, interval |
+| Sirip hiu (restart) tidak jalan | Stop dan Start capture lewat GNS3 |
 
-### 10.10 Salah ketik yang sering terjadi
+### 12.10 Salah ketik umum
 
-- `mkdir -p a b` lalu `c` diketik terpisah (jadi baris perintah sendiri): satu perintah harus satu baris.
+- Perintah terpotong ke dua baris (mis. `mkdir -p a b` lalu `c` di baris terpisah).
 - `curl` tanpa `-o`.
-- Menjalankan perintah lain di terminal yang sedang menjalankan server (`Ctrl+C` mematikan server). Gunakan terminal kedua atau `nohup`/`tmux`.
+- Mengetik di terminal yang sedang menjalankan server (`Ctrl+C` mematikannya). Pakai terminal kedua, `nohup`, atau tmux.
 - Placeholder `[IP Prefix]` atau `<angka>` tidak diganti.
-- Tabel Markdown rusak: satu baris tabel harus satu baris teks, ganti Enter dengan `<br>`, jangan ada baris kosong, awali dan akhiri dengan `|`.
+- Tabel Markdown rusak (lihat bagian 11).
 
 ---
 
-## 11. Checklist Bukti (Sesuai Ketentuan Modul)
+## 13. Checklist Bukti
 
-- Screenshot topologi GNS3 dan hasil uji konektivitas (ping, `ip route`, lease DHCP).
+- Screenshot topologi GNS3 dan hasil konektivitas (ping, `ip route`, lease DHCP).
 - Command konfigurasi penting dan tabel route, bukan hanya hasil ping.
-- Capture Wireshark dengan filter dan status bar terlihat; satu screenshot boleh untuk beberapa parameter bila jelas.
+- Screenshot Wireshark dengan filter dan status bar terlihat.
 - Pisahkan data: normal, loss 1%, CUBIC, Reno, TCP, UDP.
-- Indikator probabilistik yang tidak muncul (mis. timeout retransmission) -> jelaskan apa yang diamati dan alasannya.
-- Isi dengan **hasil aktual**, bukan angka perkiraan.
-  
+- Indikator probabilistik yang tidak muncul (mis. timeout retransmission): jelaskan apa yang diamati dan alasannya.
+- Prediksi ditulis **sebelum** melihat hasil (A.4.1, B.1, C.1).
+- Isi dengan hasil aktual, bukan perkiraan.
+- 
 ### 1.4 Referensi
 
 - https://www.geeksforgeeks.org/computer-networks/open-systems-interconnection-model-osi/
